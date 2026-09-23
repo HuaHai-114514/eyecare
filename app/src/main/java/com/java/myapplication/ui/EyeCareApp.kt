@@ -2,9 +2,12 @@ package com.java.myapplication.ui
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -21,8 +24,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.java.myapplication.data.AppInfo
 import com.java.myapplication.data.AppSettings
 import com.java.myapplication.data.EyeTips
+import com.java.myapplication.data.OnboardingStore
 import com.java.myapplication.data.StatsStore
 import com.java.myapplication.notify.RestNotifier
 import com.java.myapplication.ui.components.DailyBarChart
@@ -61,6 +66,9 @@ fun EyeCareApp(viewModel: EyeCareViewModel = viewModel()) {
     }
 
     var currentTab by remember { mutableStateOf(Tab.TIMER) }
+
+    // 首次启动引导：只在没看过时弹一次（走完或跳过都会写入完成标记）
+    var showOnboarding by remember { mutableStateOf(!OnboardingStore.isDone(context)) }
 
     // 休息倒计时全屏页
     if (viewModel.phase == RestPhase.RESTING) {
@@ -134,6 +142,16 @@ fun EyeCareApp(viewModel: EyeCareViewModel = viewModel()) {
                 TextButton(onClick = { viewModel.postponeRest(context) }) {
                     Text("稍后再说")
                 }
+            }
+        )
+    }
+
+    // 首次启动引导（v2.3.13）：免责声明 → 可靠性设置
+    if (showOnboarding) {
+        OnboardingDialog(
+            onFinish = {
+                OnboardingStore.markDone(context)
+                showOnboarding = false
             }
         )
     }
@@ -597,6 +615,11 @@ private fun SettingsTab(viewModel: EyeCareViewModel, context: Context) {
             }
         }
 
+        Spacer(Modifier.height(14.dp))
+
+        // v2.3.13：关于 —— 版本号、开源仓库、免责声明
+        AboutCard()
+
         Spacer(Modifier.height(24.dp))
 
         Button(
@@ -650,6 +673,77 @@ private fun SettingSummaryCard(title: String, lines: List<String>) {
             )
             Spacer(Modifier.height(2.dp))
         }
+    }
+}
+
+/**
+ * 「关于」区块（v2.3.13 新增）：版本号 + 开源仓库地址（可点击）+ 免责声明入口。
+ *
+ * 仓库地址同时提供纯文本与按钮两种入口：文本方便长按复制，按钮方便直接跳转。
+ * 跳转失败（设备无浏览器）时静默忽略，不影响应用本身。
+ */
+@Composable
+private fun AboutCard() {
+    val context = LocalContext.current
+    var showDisclaimer by remember { mutableStateOf(false) }
+
+    SoftCard {
+        Text(
+            "关于",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary,
+            fontWeight = FontWeight.Medium
+        )
+        Spacer(Modifier.height(10.dp))
+        Text(
+            "护眼时光 v${AppInfo.versionName(context)}",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        Spacer(Modifier.height(2.dp))
+        Text(
+            "开源项目 · 欢迎查看源码与反馈问题",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(8.dp))
+        // 纯文本地址：便于长按复制（部分用户不方便直接跳转）
+        Text(
+            AppInfo.REPO_URL_SHORT,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.clickable { openUrl(context, AppInfo.REPO_URL) }
+        )
+        Spacer(Modifier.height(12.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(
+                onClick = { openUrl(context, AppInfo.REPO_URL) },
+                shape = CircleShape
+            ) {
+                Text("打开仓库")
+            }
+            OutlinedButton(
+                onClick = { showDisclaimer = true },
+                shape = CircleShape
+            ) {
+                Text("免责声明")
+            }
+        }
+    }
+
+    if (showDisclaimer) {
+        DisclaimerDialog(onDismiss = { showDisclaimer = false })
+    }
+}
+
+/** 跳浏览器打开链接；无浏览器等异常时静默忽略，绝不因为一个链接崩掉界面 */
+private fun openUrl(context: Context, url: String) {
+    try {
+        context.startActivity(
+            Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+    } catch (_: Exception) {
     }
 }
 

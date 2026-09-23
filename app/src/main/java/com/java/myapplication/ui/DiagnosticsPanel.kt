@@ -30,7 +30,13 @@ import com.java.myapplication.notify.RestNotifier
  * 说明：自启动（MIUI/HyperOS 的应用省电策略）**没有公开 API 可以查询**，
  * 所以这里诚实地标为「需手动确认」，不做假检测。
  */
-private data class DiagItem(
+/**
+ * 单条自检项。
+ *
+ * v2.3.13 起改为 internal：首次启动引导页复用同一批检查项，
+ * 免得「自检」和「引导」各写一份、以后必然漂移。
+ */
+internal data class DiagItem(
     val title: String,
     val ok: Boolean,
     val detail: String,
@@ -89,7 +95,7 @@ fun DiagnosticsPanel(onDismiss: () -> Unit) {
 }
 
 @Composable
-private fun DiagRow(item: DiagItem) {
+internal fun DiagRow(item: DiagItem) {
     val context = LocalContext.current
     SoftCard {
         Row(
@@ -145,8 +151,8 @@ private fun appDetailIntent(context: Context): Intent =
     Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
         .setData(Uri.parse("package:${context.packageName}"))
 
-/** 逐项采集五项检查的当前状态 */
-private fun collectDiagnostics(context: Context): List<DiagItem> {
+/** 逐项采集五项检查的当前状态（v2.3.13 起 internal：自检面板与首次引导共用） */
+internal fun collectDiagnostics(context: Context): List<DiagItem> {
     val pkg = context.packageName
     val list = mutableListOf<DiagItem>()
 
