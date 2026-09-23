@@ -25,6 +25,24 @@ README 只保留精简版的版本历史与更新日志简表；需要追溯细�
 | v2.3.11 | 25 | `53a83e5e82eb3f87c0739f19a6540f9b`（11,972,111 字节） |
 | v2.3.12 | 26 | `1e5c6ba3e48290c67d6842c78247bbe8`（12,013,354 字节，debug） |
 | v2.3.13 | 27 | `fbd5f22bbfc9d99557414df718c56206`（12,029,742 字节，debug） |
+| v2.3.14 | 28 | `01ab98d6879b622a89eba03059976713`（12,029,738 字节，debug） |
+
+---
+
+## v2.3.14 改动摘要
+
+**维护性更新**：GitHub 用户名由 `HuaHai-141225` 变更为 `HuaHai-114514`，同步更新应用内硬编码的仓库地址。
+
+**修改**
+
+1. `data/AppInfo.kt`：`REPO_URL` 与 `REPO_URL_SHORT` 由 `HuaHai-141225` 改为 `HuaHai-114514`。设置页「关于」区块的「打开仓库」按钮与展示的短地址随之生效。
+2. `build.gradle.kts`：`versionCode = 28` / `versionName = "2.3.14"`。
+
+**说明**
+
+- 无功能变更，仅地址迁移。旧仓库地址 `github.com/HuaHai-141225/eyecare` 由 GitHub 自动 302 跳转到新地址，旧链接不会失效。
+- 本地 git remote 已同步改为 `git@github.com:HuaHai-114514/eyecare.git`，SSH 认证验证通过（`Hi HuaHai-114514!`）。
+- 历史 commit（`adfcad9` ~ `906cd93`）的作者名在 git 历史中仍为 `HuaHai-141225`，GitHub 已将其关联至新用户名，无需处理。
 
 ---
 

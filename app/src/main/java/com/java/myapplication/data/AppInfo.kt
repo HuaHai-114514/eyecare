@@ -14,10 +14,10 @@ import android.os.Build
 object AppInfo {
 
     /** 开源仓库地址（应用内可点击跳转） */
-    const val REPO_URL = "https://github.com/HuaHai-141225/eyecare"
+    const val REPO_URL = "https://github.com/HuaHai-114514/eyecare"
 
     /** 仓库地址的短展示形式（去掉 https:// 前缀，省界面空间） */
-    const val REPO_URL_SHORT = "github.com/HuaHai-141225/eyecare"
+    const val REPO_URL_SHORT = "github.com/HuaHai-114514/eyecare"
 
     /**
      * 读取当前安装包的版本名（如 "2.3.13"）。
