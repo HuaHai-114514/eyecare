@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 后台到点提醒：精确闹钟（Android 12+ 需系统设置授权，代码已做无权限降级） -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission
+        android:name="android.permission.USE_EXACT_ALARM"
+        tools:targetApi="33" />
+    <!-- 到点提醒弹出全屏休息页：全屏通知（Android 14+ 普通应用默认授予，
+         用户可在系统通知设置中关闭，关闭后自动退回横幅通知） -->
+    <uses-permission
+        android:name="android.permission.USE_FULL_SCREEN_INTENT"
+        tools:targetApi="29" />
+    <!-- 设备重启后重排闹钟，保证 20-20-20 循环不中断 -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- 休息结束提示音的短振动（v2.3.8 新增）。普通权限，安装即授予，不弹框 -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <application
+        android:name=".EyeCareApplication"
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.MyApplication"
+        tools:targetApi="31">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.MyApplication">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- 后台到点闹钟：工作到点发休息提醒 / 休息到点衔接下一周期 -->
+        <receiver
+            android:name=".timer.TimerReceiver"
+            android:exported="false" />
+
+        <!-- 设备重启：依据持久化状态重排闹钟 -->
+        <receiver
+            android:name=".timer.BootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+    </application>
+
+</manifest>
