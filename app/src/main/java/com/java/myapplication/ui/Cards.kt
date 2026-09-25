@@ -1,6 +1,7 @@
 package com.java.myapplication.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -15,16 +16,25 @@ import com.java.myapplication.data.EyeTip
 import com.java.myapplication.ui.theme.*
 
 // 柔和卡片容器
+// v2.4：加一层极淡的描边，让白卡从米白/夜色底里"浮"起来。
+// 之前只有背景色差（surfaceVariant vs background），层次几乎为零；
+// 描边用 outline 的低透明度版本，日夜两套主题都能自然过渡，不喧宾夺主。
 @Composable
 fun SoftCard(
     modifier: Modifier = Modifier,
     content: @Composable ColumnScope.() -> Unit
 ) {
+    val shape = RoundedCornerShape(20.dp)
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(20.dp))
+            .clip(shape)
             .background(MaterialTheme.colorScheme.surfaceVariant)
+            .border(
+                width = 1.dp,
+                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.18f),
+                shape = shape
+            )
             .padding(20.dp),
         content = content
     )

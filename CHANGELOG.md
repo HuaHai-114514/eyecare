@@ -26,6 +26,67 @@ README 只保留精简版的版本历史与更新日志简表；需要追溯细�
 | v2.3.12 | 26 | `1e5c6ba3e48290c67d6842c78247bbe8`（12,013,354 字节，debug） |
 | v2.3.13 | 27 | `fbd5f22bbfc9d99557414df718c56206`（12,029,742 字节，debug） |
 | v2.3.14 | 28 | `01ab98d6879b622a89eba03059976713`（12,029,738 字节，debug） |
+| v2.3.15 | 29 | `4ab377a275c93b705e6fb634dc563bd7`（12,062,506 字节，debug） |
+
+---
+
+## v2.3.15 改动摘要
+
+这一版是一次 **UI / 交互重构**：把设置页从「只读摘要 + 弹窗编辑」改成「所有参数直接铺在页面上、改一下立即生效」，同时把底部导航与顶栏的 emoji 换成矢量图标，并把休息结束提示音的音源选择收成下拉框。
+
+### 一、设置页即时生效 + 卡片流
+
+**背景**：此前设置页四张卡只显示当前值，真正能改的东西全藏在一个弹窗里 —— 必须点底部「修改设置」按钮才弹出，改完点「保存」再关掉。两段式操作繁琐，且与「设置就是拿来改的」这一直觉不符。
+
+**改动**：
+
+1. **新建 `ui/SettingsTab.kt`**（555 行）：把原 `SettingsDialog` 里全部 11 项参数直接铺到设置页上，分四张分组卡片：
+   - **计时**：用眼提醒间隔（1–120 分）、休息时长（5–300 秒）、每日用眼目标（10–720 分）
+   - **提醒**：到点自动全屏、免打扰开关、免打扰时段（`HH:mm`）、久坐提醒、休息结束提示音开关 + 振动开关 + 音源
+   - **久坐**：久坐提醒开关、提醒间隔（30 / 45 / 60 分钟选项片）
+   - **外观**：自动夜间模式
+2. **即时生效**：所有控件统一走 `viewModel.updateSettings(context, transform(viewModel.settings))`，基于最新设置做变换，避免闭包捕获旧值互相覆盖。
+   - 开关 / 下拉 / 选项片：点一下立即落盘；
+   - 数字输入框：**失焦或键盘 Done** 时提交，避免每敲一位都写盘；
+   - 时间输入框：失焦 / 回车时用 `AppSettings.parseMinuteOfDay` 解析提交，非法值回退原值。
+3. **删除旧两段式**：移除「修改设置」按钮、`SettingsDialog` 弹窗调用与 `showDialog` 状态；`EyeCareApp.kt` 内的旧私有 `SettingsTab` / `SettingSummaryCard` / `AboutCard` / `openUrl` 及 `SettingsDialog` 调用（约 227 行）一并清除，并清理随之无用的 import。
+4. **底部保留**：提醒可靠性自检卡片、关于卡片（版本 / 仓库 / 免责声明入口）仍在页面下方。
+
+### 二、底部导航与顶栏 emoji → 矢量图标
+
+**背景**：底部四个 `NavigationBarItem` 与顶栏设置按钮此前用 emoji（⏱️ / 💡 / 📊 / ⚙️）当图标，观感偏随意，与「简约大气」的目标不符。
+
+**改动**：
+
+1. **新建 `ui/components/EyeIcons.kt`**（232 行）：手写 5 个 `ImageVector` —— `Timer`（秒表）、`Tips`（灯泡）、`Report`（三根柱子）、`Settings`（齿轮）、`ArrowDropDown`（下拉三角）。
+   - **不引入 `material-icons-extended`**：本地 Gradle 缓存没有该依赖，且它会让包体膨胀几十 MB；手工内联所需 path，合计仅几 KB。
+2. `EyeCareApp.kt` 中 4 个 `NavigationBarItem` 与顶栏 `IconButton` 的 emoji 全部替换为 `Icon(EyeIcons.XXX)`。
+
+### 三、休息结束提示音音源 → 下拉选择
+
+**改动**：`SettingsDialog.kt` 中原先 6 行平铺 `RadioButton` 的音源单选，收成一个 `OutlinedButton` + `DropdownMenu` 下拉框（菜单项带 `RadioButton` 作为选中标识），右侧保留「试听」按钮，当前音源说明与音量提示显示在下方小字。复用 `EyeIcons.ArrowDropDown`。
+
+### 四、卡片描边
+
+`ui/Cards.kt` 的 `SoftCard` 增加一层极淡描边（`outline` 18% 透明度、1dp 宽），让白卡从米白 / 夜色底里「浮」起来 —— 此前只有背景色差（`surfaceVariant` vs `background`），层次几乎为零。全局生效，日夜两套主题自然过渡。
+
+### 验证
+
+- `:app:compileDebugKotlin` ✅
+- `:app:testDebugUnitTest --rerun-tasks` ✅
+- `:app:assembleDebug --rerun-tasks` ✅
+- 真机实测：设置页即时生效、数字失焦提交、音源下拉与试听、卡片描边层次均正常。
+
+### 涉及文件
+
+| 文件 | 操作 |
+|---|---|
+| `ui/SettingsTab.kt` | 新建（555 行） |
+| `ui/components/EyeIcons.kt` | 新建（232 行） |
+| `ui/EyeCareApp.kt` | 导航/顶栏图标替换；删除旧私有 `SettingsTab` 等约 227 行 |
+| `ui/Cards.kt` | `SoftCard` 加描边 |
+| `ui/SettingsDialog.kt` | 音源改下拉；清理 import |
+| `app/build.gradle.kts` | `versionCode = 29` / `versionName = "2.3.15"` |
 
 ---
 

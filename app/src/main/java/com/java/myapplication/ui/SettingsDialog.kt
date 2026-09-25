@@ -2,7 +2,6 @@ package com.java.myapplication.ui
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -12,13 +11,14 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.java.myapplication.data.AppSettings
 import com.java.myapplication.notify.RestSoundPlayer
 import com.java.myapplication.notify.RestSoundSource
+import com.java.myapplication.ui.components.EyeIcons
 
 /**
  * 护眼设置（v2.3 分组版）。
@@ -153,40 +153,71 @@ fun SettingsDialog(
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    RestSoundSource.CHOICES.forEach { source ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .selectable(
-                                    selected = restEndSoundSource == source,
-                                    onClick = { restEndSoundSource = source },
-                                    role = Role.RadioButton
-                                )
-                                .padding(vertical = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            RadioButton(
-                                selected = restEndSoundSource == source,
-                                onClick = null
-                            )
-                            Column(modifier = Modifier.weight(1f).padding(start = 4.dp)) {
+                    // 下拉选择：把原先六行平铺单选收成一个下拉框，右侧保留「试听」。
+                    // 菜单里只列音源名，当前选中项的说明显示在下方小字里。
+                    var soundMenuExpanded by remember { mutableStateOf(false) }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Box(modifier = Modifier.weight(1f)) {
+                            OutlinedButton(
+                                onClick = { soundMenuExpanded = true },
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(16.dp),
+                                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp)
+                            ) {
                                 Text(
-                                    source.label,
+                                    text = restEndSoundSource.label,
+                                    modifier = Modifier.weight(1f),
                                     style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurface
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
-                                Text(
-                                    source.hint,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                Icon(
+                                    imageVector = EyeIcons.ArrowDropDown,
+                                    contentDescription = "展开音源列表",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
-                            // 每行一个「试听」：切到哪个当场就能听，不必反复保存
-                            TextButton(onClick = { RestSoundPlayer.play(context, source) }) {
-                                Text("试听", color = MaterialTheme.colorScheme.primary)
+                            DropdownMenu(
+                                expanded = soundMenuExpanded,
+                                onDismissRequest = { soundMenuExpanded = false }
+                            ) {
+                                RestSoundSource.CHOICES.forEach { source ->
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text(
+                                                source.label,
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                color = MaterialTheme.colorScheme.onSurface
+                                            )
+                                        },
+                                        onClick = {
+                                            restEndSoundSource = source
+                                            soundMenuExpanded = false
+                                        },
+                                        leadingIcon = {
+                                            RadioButton(
+                                                selected = restEndSoundSource == source,
+                                                onClick = null
+                                            )
+                                        }
+                                    )
+                                }
                             }
                         }
+                        TextButton(onClick = { RestSoundPlayer.play(context, restEndSoundSource) }) {
+                            Text("试听", color = MaterialTheme.colorScheme.primary)
+                        }
                     }
+                    Text(
+                        text = restEndSoundSource.hint,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Text(
                         text = "音量跟随系统「通知音量」。静音 / 勿扰时会安静，只留通知与振动。",
                         style = MaterialTheme.typography.bodySmall,

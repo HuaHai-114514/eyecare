@@ -1,9 +1,0 @@
-{
-  "app_name": "护眼时光",
-  "package_name": "com.java.myapplication",
-  "architecture": "MVVM",
-  "ui_framework": "Jetpack Compose",
-  "language": "Kotlin",
-  "project_dir": "/data/user/0/com.ai.assistance.operit/files/workspace/bdf4b9b6-4b62-4e3e-996f-f38d6669018c",
-  "description": "健康用眼提醒 App：20-20-20 法则计时、健康用眼知识弹窗、护眼绿配色、夜间模式、数据报告"
-}

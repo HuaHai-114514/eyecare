@@ -2,12 +2,9 @@ package com.java.myapplication.ui
 
 import android.Manifest
 import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.os.Build
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -24,13 +21,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.java.myapplication.data.AppInfo
 import com.java.myapplication.data.AppSettings
 import com.java.myapplication.data.EyeTips
 import com.java.myapplication.data.OnboardingStore
 import com.java.myapplication.data.StatsStore
 import com.java.myapplication.notify.RestNotifier
 import com.java.myapplication.ui.components.DailyBarChart
+import com.java.myapplication.ui.components.EyeIcons
 import com.java.myapplication.ui.components.EyeProgressRing
 import com.java.myapplication.ui.theme.*
 
@@ -85,25 +82,25 @@ fun EyeCareApp(viewModel: EyeCareViewModel = viewModel()) {
                 NavigationBarItem(
                     selected = currentTab == Tab.TIMER,
                     onClick = { currentTab = Tab.TIMER },
-                    icon = { Text("⏱️", fontSize = 20.sp) },
+                    icon = { Icon(EyeIcons.Timer, contentDescription = "护眼计时") },
                     label = { Text("护眼计时") }
                 )
                 NavigationBarItem(
                     selected = currentTab == Tab.TIPS,
                     onClick = { currentTab = Tab.TIPS },
-                    icon = { Text("\uD83D\uDCA1", fontSize = 20.sp) },
+                    icon = { Icon(EyeIcons.Tips, contentDescription = "护眼知识") },
                     label = { Text("护眼知识") }
                 )
                 NavigationBarItem(
                     selected = currentTab == Tab.REPORT,
                     onClick = { currentTab = Tab.REPORT },
-                    icon = { Text("📊", fontSize = 20.sp) },
+                    icon = { Icon(EyeIcons.Report, contentDescription = "数据报告") },
                     label = { Text("数据报告") }
                 )
                 NavigationBarItem(
                     selected = currentTab == Tab.SETTINGS,
                     onClick = { currentTab = Tab.SETTINGS },
-                    icon = { Text("⚙️", fontSize = 20.sp) },
+                    icon = { Icon(EyeIcons.Settings, contentDescription = "护眼设置") },
                     label = { Text("护眼设置") }
                 )
             }
@@ -190,7 +187,11 @@ private fun TimerTab(
                 )
             }
             IconButton(onClick = onOpenSettings) {
-                Text("⚙️", fontSize = 22.sp)
+                Icon(
+                    EyeIcons.Settings,
+                    contentDescription = "打开设置",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
 
@@ -517,234 +518,6 @@ private fun buildReportAdvice(
         parts.add(if (pct > 0) "环比上升 $pct%" else "环比下降 ${-pct}%")
     }
     return parts.joinToString(" · ")
-}
-
-// ============ 护眼设置页 ============
-@Composable
-private fun SettingsTab(viewModel: EyeCareViewModel, context: Context) {
-    var showDialog by remember { mutableStateOf(false) }
-    var showDiagnostics by remember { mutableStateOf(false) }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 24.dp, vertical = 20.dp)
-    ) {
-        Text(
-            "护眼设置",
-            style = MaterialTheme.typography.headlineLarge,
-            fontWeight = FontWeight.Medium,
-            color = MaterialTheme.colorScheme.onBackground
-        )
-        Text(
-            "调整计时、提醒与外观",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-
-        Spacer(Modifier.height(20.dp))
-
-        val s = viewModel.settings
-
-        SettingSummaryCard(
-            title = "计时",
-            lines = listOf(
-                "用眼提醒间隔：${s.workMinutes} 分钟",
-                "休息时长：${s.restSeconds} 秒",
-                "每日用眼目标：${s.dailyGoalMinutes} 分钟"
-            )
-        )
-        Spacer(Modifier.height(14.dp))
-        SettingSummaryCard(
-            title = "提醒",
-            lines = listOf(
-                "到点自动全屏：${if (s.autoFullScreen) "已开启" else "已关闭"}",
-                "免打扰：${
-                    if (s.dndEnabled)
-                        "${AppSettingsTimeText(s.dndStartMinute)} - ${AppSettingsTimeText(s.dndEndMinute)}"
-                    else "未启用"
-                }",
-                "休息结束提示音：${
-                    AppSettings.describeRestEndSound(
-                        s.restEndSoundEnabled,
-                        s.restEndSoundVibrate,
-                        s.restEndSoundSource.label
-                    )
-                }"
-            )
-        )
-        Spacer(Modifier.height(14.dp))
-        SettingSummaryCard(
-            title = "久坐",
-            lines = listOf(
-                "久坐提醒：${if (s.sitReminderEnabled) "已开启" else "已关闭"}",
-                "提醒间隔：每 ${s.sitIntervalMinutes} 分钟"
-            )
-        )
-        Spacer(Modifier.height(14.dp))
-        SettingSummaryCard(
-            title = "外观",
-            lines = listOf(
-                "自动夜间模式：${if (s.autoNightMode) "已开启" else "已关闭"}"
-            )
-        )
-
-        Spacer(Modifier.height(14.dp))
-
-        // 提醒可靠性自检入口：提醒不准时，用户自己就能查原因
-        SoftCard {
-            Text(
-                "提醒可靠性自检",
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                "如果提醒不准时，按清单逐项检查通知权限、精确闹钟、全屏通知、电池优化与自启动",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(Modifier.height(10.dp))
-            OutlinedButton(
-                onClick = { showDiagnostics = true },
-                shape = CircleShape,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text("开始自检")
-            }
-        }
-
-        Spacer(Modifier.height(14.dp))
-
-        // v2.3.13：关于 —— 版本号、开源仓库、免责声明
-        AboutCard()
-
-        Spacer(Modifier.height(24.dp))
-
-        Button(
-            onClick = { showDialog = true },
-            shape = CircleShape,
-            modifier = Modifier.fillMaxWidth().height(54.dp),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = MaterialTheme.colorScheme.primary
-            )
-        ) {
-            Text("修改设置", fontSize = 17.sp, fontWeight = FontWeight.Medium)
-        }
-
-        Spacer(Modifier.height(24.dp))
-    }
-
-    if (showDialog) {
-        SettingsDialog(
-            settings = viewModel.settings,
-            onDismiss = { showDialog = false },
-            onSave = { newSettings ->
-                viewModel.updateSettings(context, newSettings)
-                showDialog = false
-            }
-        )
-    }
-
-    if (showDiagnostics) {
-        DiagnosticsPanel(onDismiss = { showDiagnostics = false })
-    }
-}
-
-private fun AppSettingsTimeText(minute: Int): String =
-    com.java.myapplication.data.AppSettings.formatMinuteOfDay(minute)
-
-@Composable
-private fun SettingSummaryCard(title: String, lines: List<String>) {
-    SoftCard {
-        Text(
-            title,
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.primary,
-            fontWeight = FontWeight.Medium
-        )
-        Spacer(Modifier.height(8.dp))
-        lines.forEach { line ->
-            Text(
-                line,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(Modifier.height(2.dp))
-        }
-    }
-}
-
-/**
- * 「关于」区块（v2.3.13 新增）：版本号 + 开源仓库地址（可点击）+ 免责声明入口。
- *
- * 仓库地址同时提供纯文本与按钮两种入口：文本方便长按复制，按钮方便直接跳转。
- * 跳转失败（设备无浏览器）时静默忽略，不影响应用本身。
- */
-@Composable
-private fun AboutCard() {
-    val context = LocalContext.current
-    var showDisclaimer by remember { mutableStateOf(false) }
-
-    SoftCard {
-        Text(
-            "关于",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.primary,
-            fontWeight = FontWeight.Medium
-        )
-        Spacer(Modifier.height(10.dp))
-        Text(
-            "护眼时光 v${AppInfo.versionName(context)}",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurface
-        )
-        Spacer(Modifier.height(2.dp))
-        Text(
-            "开源项目 · 欢迎查看源码与反馈问题",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Spacer(Modifier.height(8.dp))
-        // 纯文本地址：便于长按复制（部分用户不方便直接跳转）
-        Text(
-            AppInfo.REPO_URL_SHORT,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.clickable { openUrl(context, AppInfo.REPO_URL) }
-        )
-        Spacer(Modifier.height(12.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(
-                onClick = { openUrl(context, AppInfo.REPO_URL) },
-                shape = CircleShape
-            ) {
-                Text("打开仓库")
-            }
-            OutlinedButton(
-                onClick = { showDisclaimer = true },
-                shape = CircleShape
-            ) {
-                Text("免责声明")
-            }
-        }
-    }
-
-    if (showDisclaimer) {
-        DisclaimerDialog(onDismiss = { showDisclaimer = false })
-    }
-}
-
-/** 跳浏览器打开链接；无浏览器等异常时静默忽略，绝不因为一个链接崩掉界面 */
-private fun openUrl(context: Context, url: String) {
-    try {
-        context.startActivity(
-            Intent(Intent.ACTION_VIEW, Uri.parse(url))
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        )
-    } catch (_: Exception) {
-    }
 }
 
 private fun requestNotificationPermission(context: Context) {
