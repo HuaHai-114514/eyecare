@@ -33,6 +33,8 @@ class TimerReceiver : BroadcastReceiver() {
                 )
                 SitReminder.onDeadline(context, silent)
             }
+            // 超时二次提醒（v2.4.0）：到点后用户仍未休息，每 N 分钟循环触发一次
+            AlarmScheduler.ACTION_OVERDUE -> EyeTimer.onOverdueReminder(context)
         }
     }
 }

@@ -40,6 +40,8 @@ object RestNotifier {
     private const val NOTIFICATION_ID = 1001
     // 独立 id，避免与到点提醒（1001）互相顶掉
     private const val REST_END_NOTIFICATION_ID = 1004
+    // 超时二次提醒（v2.4.0）：独立 id，不覆盖上面两条
+    private const val OVERDUE_NOTIFICATION_ID = 1006
 
     // 通知「开始休息」按钮携带的 action（MainActivity 据此切换到休息状态）
     const val ACTION_REST_NOW = "com.java.myapplication.ACTION_REST_NOW"
@@ -237,6 +239,67 @@ object RestNotifier {
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         try {
             nm.notify(REST_END_NOTIFICATION_ID, builder.build())
+        } catch (_: SecurityException) {
+        }
+    }
+
+    /**
+     * 超时二次提醒（v2.4.0）：到点后用户迟迟不点「开始休息」时，每 N 分钟重复弹一次。
+     *
+     * 与首次 [notifyRestReminder] 不同：这里的语气是「还在用眼，时间又在累积了」，
+     * 并给出已超时时长，让用户直观感知拖了多久。
+     *
+     * @param overdueMinutes 当前这一轮超时用眼已持续的分钟数
+     * @param totalWorkMinutes 含超时在内的本次连续用眼总时长（分钟）
+     */
+    fun notifyOverdueReminder(context: Context, overdueMinutes: Int, totalWorkMinutes: Int) {
+        ensureChannel(context)
+
+        if (!canPostNotifications(context)) return
+
+        val settings = SettingsStore.load(context)
+        val restSeconds = settings.restSeconds
+
+        val openIntent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val contentPending = PendingIntent.getActivity(
+            context, 1002, openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        // 复用同一渠道与通知本体 id（1001）：同一条提醒就地刷新，不会堆一屏通知
+        val builder = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_eye_care)
+            .setContentTitle("🌿 还在用眼，该休息啦")
+            .setContentText("已超出 $overdueMinutes 分钟，点击「开始休息」")
+            .setStyle(
+                NotificationCompat.BigTextStyle()
+                    .bigText("本次已连续用眼 $totalWorkMinutes 分钟（超时 $overdueMinutes 分钟）。点下方「开始休息」，起算 $restSeconds 秒远眺倒计时。")
+            )
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setCategory(NotificationCompat.CATEGORY_REMINDER)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setAutoCancel(true)
+            .setContentIntent(contentPending)
+
+        if (settings.autoFullScreen && hasFullScreenPermission(context)) {
+            builder.setFullScreenIntent(contentPending, true)
+        }
+
+        val restPending = PendingIntent.getActivity(
+            context, 1003,
+            Intent(context, MainActivity::class.java).apply {
+                action = ACTION_REST_NOW
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        builder.addAction(0, "🌿 开始休息", restPending)
+
+        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        try {
+            nm.notify(NOTIFICATION_ID, builder.build())
         } catch (_: SecurityException) {
         }
     }

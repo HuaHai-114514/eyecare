@@ -27,6 +27,71 @@ README 只保留精简版的版本历史与更新日志简表；需要追溯细�
 | v2.3.13 | 27 | `fbd5f22bbfc9d99557414df718c56206`（12,029,742 字节，debug） |
 | v2.3.14 | 28 | `01ab98d6879b622a89eba03059976713`（12,029,738 字节，debug） |
 | v2.3.15 | 29 | `4ab377a275c93b705e6fb634dc563bd7`（12,062,506 字节，debug） |
+| v2.4.0 | 30 | `c937b2ec574a61d486440f15e1166780`（8,131,039 字节，release 已签名） |
+
+---
+
+## v2.4.0 改动摘要
+
+这一版新增 **「超时二次提醒」**：用眼到点后，如果用户选择「稍后再说」而不去休息，超出的时间会继续计入当日用眼统计，并每隔 N 分钟重复提醒一次；同时把主页的「科普」独立页改为**卡片轮播**，并补上若干过渡动效。
+
+### 一、超时二次提醒（核心）
+
+**背景**：此前到点提醒后点「稍后再说」，倒计时停住、不再提醒，用户很容易「一拖再拖」，超出的用眼时间也不会进入统计，数据失真。
+
+**改动**：
+
+1. **timer/EyeTimer.kt**：实现一套超时累计状态机。
+   - 到点后进入「超时」态：overdueStartAt 记录起点，此后**亮屏时继续累计**、**息屏时冻结**（屏幕黑掉不算用眼），恢复亮屏再续上。
+   - 超时秒数通过 overdueDeltaSeconds() 单独计，最终并入当次工作会话，写入统计。
+   - 抽出两个**纯函数** accumulatedAt() 与 overdueDeltaSeconds()，便于单元测试覆盖核心算术。
+   - 多个出口（开始休息 / 停止 / 设置变更 / 息屏）都会撤销超时闹钟，避免悬挂提醒。
+   - 新增 onOverdueReminder()：每次被闹钟唤醒时累加本轮超时，刷新通知，并**再次调度**下一次提醒，形成每 N 分钟循环。
+2. **timer/AlarmScheduler.kt**：新增 ACTION_OVERDUE 广播动作、REQUEST_OVERDUE = 2004 请求码，以及 scheduleOverdueReminder() / cancelOverdueReminder()；列入 cancelAll() 统一回收。
+3. **notify/RestNotifier.kt**：新增 notifyOverdueReminder(context, overdueMinutes, totalWorkMinutes)，复用通知 ID 1001 **就地刷新**同一条提醒（不叠通知），文案展示已超时分钟数与本次累计用眼。
+4. **timer/TimerReceiver.kt**：when 增加 ACTION_OVERDUE -> EyeTimer.onOverdueReminder(context) 分支。
+5. **ui/SettingsTab.kt**：「计时」分组新增「超时二次提醒间隔」设置项（含开关与分钟输入），落盘后即时生效。
+
+**修复的 Bug**：
+
+- overdueRecordedAfter 参数顺序写反（3 处），导致已计入的超时段落被重复累计。
+- notifyOverdueReminder 传参语义错误（分钟 / 秒与总时长错位）。
+
+### 二、科普页 → 主页卡片轮播
+
+**背景**：底部导航原先有一个独立的「科普」页，只展示一条随机文案，信息密度低、来回切换成本高。
+
+**改动**：
+
+1. **ui/Cards.kt**：新增 TipCarousel 轮播组件 —— AnimatedContent 实现左右切换动画 + 手势滑动，**零新依赖**（未引入 pager）。
+2. **ui/EyeCareApp.kt**：删除独立的 TIPS 导航页，主页改用 TipCarousel 展示科普；并补充过渡动效（Tab 切换淡入、免打扰卡淡入）。
+
+### 三、测试
+
+- **新增 test/OverdueStatTest.kt**：10 个用例，覆盖超时统计的核心算术（累计、冻结、跨段合并、边界值）。
+- 全部 **25 个单元测试通过**：AppSettingsTimeTest(11) + DndWindowTest(4) + OverdueStatTest(10)。
+
+### 四、构建与环境
+
+- **AGP 9.0.0 + Gradle 9.1.0**。
+- **关键修复**：AGP 9 的 optimizeReleaseResources（aapt2 optimize）在本 proot 环境下**静默产出空资源包**，导致成品 APK 缺失 AndroidManifest.xml / resources.arsc，无法解析安装（系统报 FileNotFoundException: AndroidManifest.xml）。已在 gradle.properties 关闭资源优化：`android.enableResourceOptimizations=false`。关闭后产物回归正常（155 条目、含 manifest + arsc + 68 个 res/）。
+- **签名**：app/build.gradle.kts 新增 signingConfigs.local，按「环境变量 EYECARE_KEYSTORE → user.home → /root/.android/debug.keystore」探测 keystore；找不到时退化为未签名构建，不影响其他环境。release 默认 v2/v3 签名。
+- **产物**：app/build/outputs/apk/release/app-release.apk，已在真机通过 pm install 验证安装成功（versionCode 30 / versionName 2.4.0）。
+
+### 涉及文件
+
+| 文件 | 操作 |
+|---|---|
+| timer/EyeTimer.kt | 超时累计状态机；新增 onOverdueReminder()、纯函数 accumulatedAt() / overdueDeltaSeconds() |
+| timer/AlarmScheduler.kt | ACTION_OVERDUE / REQUEST_OVERDUE / scheduleOverdueReminder() / cancelOverdueReminder() |
+| timer/TimerReceiver.kt | 新增 ACTION_OVERDUE 分支 |
+| notify/RestNotifier.kt | notifyOverdueReminder()（就地刷新 ID 1001） |
+| ui/SettingsTab.kt | 新增「超时二次提醒间隔」设置项 |
+| ui/Cards.kt | 新增 TipCarousel 轮播 |
+| ui/EyeCareApp.kt | 删除 TIPS 页、主页改轮播、补动效 |
+| test/OverdueStatTest.kt | 新建（10 用例） |
+| app/build.gradle.kts | versionCode = 30 / versionName = "2.4.0"；新增本地签名配置 |
+| gradle.properties | 关闭 AGP 9 资源优化（proot 兼容） |
 
 ---
 

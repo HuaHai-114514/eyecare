@@ -21,7 +21,13 @@ data class TimerState(
     val screenOnAt: Long = -1L,          // 本次亮屏开始时刻；-1 表示未在累计
     val offAt: Long = -1L,               // 最近一次息屏时刻
     val restStart: Long = -1L,           // 休息开始时刻
-    val tipIndex: Int = -1               // 休息页展示的知识索引
+    val tipIndex: Int = -1,              // 休息页展示的知识索引
+
+    // ============ v2.4.0：超时二次提醒 ============
+    /** 已到点等待休息期间，超时累计是否已在走动（true 表示超时时长正在计入统计） */
+    val overdueCounting: Boolean = false,
+    /** 超时累计已结算并写入统计的毫秒数（避免重复计入） */
+    val overdueRecordedMs: Long = 0L
 )
 
 object TimerStore {
@@ -34,6 +40,9 @@ object TimerStore {
     private const val KEY_OFF_AT = "off_at"
     private const val KEY_REST_START = "rest_start"
     private const val KEY_TIP_INDEX = "tip_index"
+    // v2.4.0
+    private const val KEY_OVERDUE_COUNTING = "overdue_counting"
+    private const val KEY_OVERDUE_RECORDED_MS = "overdue_recorded_ms"
 
     private fun prefs(context: Context): SharedPreferences =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -48,7 +57,9 @@ object TimerStore {
             screenOnAt = p.getLong(KEY_SCREEN_ON_AT, -1L),
             offAt = p.getLong(KEY_OFF_AT, -1L),
             restStart = p.getLong(KEY_REST_START, -1L),
-            tipIndex = p.getInt(KEY_TIP_INDEX, -1)
+            tipIndex = p.getInt(KEY_TIP_INDEX, -1),
+            overdueCounting = p.getBoolean(KEY_OVERDUE_COUNTING, false),
+            overdueRecordedMs = p.getLong(KEY_OVERDUE_RECORDED_MS, 0L)
         )
     }
 
@@ -62,6 +73,8 @@ object TimerStore {
             .putLong(KEY_OFF_AT, state.offAt)
             .putLong(KEY_REST_START, state.restStart)
             .putInt(KEY_TIP_INDEX, state.tipIndex)
+            .putBoolean(KEY_OVERDUE_COUNTING, state.overdueCounting)
+            .putLong(KEY_OVERDUE_RECORDED_MS, state.overdueRecordedMs)
             .apply()
     }
 }

@@ -4,6 +4,12 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -22,7 +28,6 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.java.myapplication.data.AppSettings
-import com.java.myapplication.data.EyeTips
 import com.java.myapplication.data.OnboardingStore
 import com.java.myapplication.data.StatsStore
 import com.java.myapplication.notify.RestNotifier
@@ -31,7 +36,7 @@ import com.java.myapplication.ui.components.EyeIcons
 import com.java.myapplication.ui.components.EyeProgressRing
 import com.java.myapplication.ui.theme.*
 
-private enum class Tab { TIMER, TIPS, REPORT, SETTINGS }
+private enum class Tab { TIMER, REPORT, SETTINGS }
 
 /** 报告页时间档位 */
 private enum class ReportRange(val days: Int, val label: String) {
@@ -86,12 +91,6 @@ fun EyeCareApp(viewModel: EyeCareViewModel = viewModel()) {
                     label = { Text("护眼计时") }
                 )
                 NavigationBarItem(
-                    selected = currentTab == Tab.TIPS,
-                    onClick = { currentTab = Tab.TIPS },
-                    icon = { Icon(EyeIcons.Tips, contentDescription = "护眼知识") },
-                    label = { Text("护眼知识") }
-                )
-                NavigationBarItem(
                     selected = currentTab == Tab.REPORT,
                     onClick = { currentTab = Tab.REPORT },
                     icon = { Icon(EyeIcons.Report, contentDescription = "数据报告") },
@@ -107,11 +106,17 @@ fun EyeCareApp(viewModel: EyeCareViewModel = viewModel()) {
         }
     ) { innerPadding ->
         Box(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
-            when (currentTab) {
-                Tab.TIMER -> TimerTab(viewModel, context, onOpenSettings = { currentTab = Tab.SETTINGS })
-                Tab.TIPS -> TipsTab()
-                Tab.REPORT -> ReportTab(viewModel, context)
-                Tab.SETTINGS -> SettingsTab(viewModel, context)
+            // 页面切换淡入淡出，避免生硬跳切
+            AnimatedContent(
+                targetState = currentTab,
+                transitionSpec = { fadeIn(tween(220)) togetherWith fadeOut(tween(160)) },
+                label = "tab-switch"
+            ) { tab ->
+                when (tab) {
+                    Tab.TIMER -> TimerTab(viewModel, context, onOpenSettings = { currentTab = Tab.SETTINGS })
+                    Tab.REPORT -> ReportTab(viewModel, context)
+                    Tab.SETTINGS -> SettingsTab(viewModel, context)
+                }
             }
         }
     }
@@ -197,22 +202,28 @@ private fun TimerTab(
 
         Spacer(Modifier.height(20.dp))
 
-        // 免打扰进行中提示（有则显示）
-        if (viewModel.inDndWindow) {
-            SoftCard {
-                Text(
-                    "🌙 免打扰时段进行中",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    "这段时间只为你计时，不会打扰你。出时段后自动恢复提醒。",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+        // 免打扰进行中提示（有则淡入显示）
+        AnimatedVisibility(
+            visible = viewModel.inDndWindow,
+            enter = fadeIn(tween(300)),
+            exit = fadeOut(tween(200))
+        ) {
+            Column {
+                SoftCard {
+                    Text(
+                        "🌙 免打扰时段进行中",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "这段时间只为你计时，不会打扰你。出时段后自动恢复提醒。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Spacer(Modifier.height(20.dp))
             }
-            Spacer(Modifier.height(20.dp))
         }
 
         // 提醒开关
@@ -270,8 +281,8 @@ private fun TimerTab(
 
         Spacer(Modifier.height(24.dp))
 
-        // 健康知识卡片
-        TipCard(tip = viewModel.currentTip)
+        // 护眼知识轮播（v2.4.0：取代原「护眼知识」导航页）
+        TipCarousel()
 
         Spacer(Modifier.height(24.dp))
 
@@ -282,52 +293,6 @@ private fun TimerTab(
             restCount = viewModel.todayCount,
             goalMinutes = viewModel.settings.dailyGoalMinutes
         )
-
-        Spacer(Modifier.height(24.dp))
-    }
-}
-
-// ============ 护眼知识页 ============
-@Composable
-private fun TipsTab() {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 24.dp, vertical = 20.dp)
-    ) {
-        Text(
-            "护眼小知识",
-            style = MaterialTheme.typography.headlineLarge,
-            fontWeight = FontWeight.Medium,
-            color = MaterialTheme.colorScheme.onBackground
-        )
-        Text(
-            "${EyeTips.tips.size} 条日常用眼好习惯，一起守护明亮双眼",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-
-        Spacer(Modifier.height(20.dp))
-
-        EyeTips.tips.forEachIndexed { index, tip ->
-            SoftCard {
-                Text(
-                    "${tip.emoji} ${tip.title}",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    tip.content,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            if (index != EyeTips.tips.lastIndex) {
-                Spacer(Modifier.height(16.dp))
-            }
-        }
 
         Spacer(Modifier.height(24.dp))
     }

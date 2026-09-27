@@ -18,10 +18,12 @@ object AlarmScheduler {
     const val ACTION_WORK_DONE = "com.java.myapplication.ACTION_WORK_DONE"
     const val ACTION_REST_DONE = "com.java.myapplication.ACTION_REST_DONE"
     const val ACTION_SIT_DONE = "com.java.myapplication.ACTION_SIT_DONE"
+    const val ACTION_OVERDUE = "com.java.myapplication.ACTION_OVERDUE"
 
     private const val REQUEST_WORK = 2001
     private const val REQUEST_REST = 2002
     private const val REQUEST_SIT = 2003
+    private const val REQUEST_OVERDUE = 2004
 
     fun scheduleWorkDeadline(context: Context, triggerAt: Long) {
         setAlarm(context, triggerAt, pendingIntent(context, ACTION_WORK_DONE, REQUEST_WORK))
@@ -34,6 +36,18 @@ object AlarmScheduler {
     /** 久坐提醒：与 20-20-20 周期独立，按设定间隔重复唤醒（亮屏期间才有效） */
     fun scheduleSitReminder(context: Context, triggerAt: Long) {
         setAlarm(context, triggerAt, pendingIntent(context, ACTION_SIT_DONE, REQUEST_SIT))
+    }
+
+    /**
+     * 超时二次提醒（v2.4.0）：到点后用户迟迟不点「开始休息」时，
+     * 每 N 分钟重复唤醒提醒一次，直到用户休息或息屏为止。
+     */
+    fun scheduleOverdueReminder(context: Context, triggerAt: Long) {
+        setAlarm(context, triggerAt, pendingIntent(context, ACTION_OVERDUE, REQUEST_OVERDUE))
+    }
+
+    fun cancelOverdueReminder(context: Context) {
+        alarmManager(context).cancel(pendingIntent(context, ACTION_OVERDUE, REQUEST_OVERDUE))
     }
 
     fun cancelWorkAlarm(context: Context) {
@@ -65,6 +79,7 @@ object AlarmScheduler {
     fun cancelAll(context: Context) {
         cancelWorkAlarm(context)
         cancelRestAlarm(context)
+        cancelOverdueReminder(context)
     }
 
     private fun alarmManager(context: Context): AlarmManager =

@@ -22,6 +22,13 @@ data class AppSettings(
     val dailyGoalMinutes: Int = 60,     // 每日用眼目标上限（分钟）
 
     // ============ 提醒 ============
+    /**
+     * 超时二次提醒间隔（分钟，v2.4.0 新增）。
+     *
+     * 用眼到点后若用户一直不开始休息，每隔该分钟数重复提醒一次，直到开始休息。
+     * 范围 1–30，默认 2。
+     */
+    val overdueRemindMinutes: Int = 2,
     val autoFullScreen: Boolean = true, // 到点是否自动弹出全屏休息页
     val dndEnabled: Boolean = false,    // 免打扰时段开关
     val dndStartMinute: Int = 12 * 60,  // 免打扰开始（当天 0 点起的分钟数，默认 12:00）
@@ -57,6 +64,9 @@ data class AppSettings(
     companion object {
         /** 久坐间隔可选值，设置页用 */
         val SIT_INTERVAL_CHOICES = listOf(30, 45, 60)
+
+        /** 超时二次提醒间隔的可调范围（分钟，v2.4.0） */
+        val OVERDUE_REMIND_RANGE = 1..30
 
         /**
          * 提示音状态的可读文案（v2.3.8，v2.3.12 增加音源）。
@@ -110,6 +120,8 @@ object SettingsStore {
     // v2.3 新增
     private const val KEY_DAILY_GOAL = "daily_goal_minutes"
     private const val KEY_AUTO_FULL_SCREEN = "auto_full_screen"
+    // v2.4.0
+    private const val KEY_OVERDUE_REMIND_MINUTES = "overdue_remind_minutes"
     private const val KEY_DND_ENABLED = "dnd_enabled"
     private const val KEY_DND_START = "dnd_start_minute"
     private const val KEY_DND_END = "dnd_end_minute"
@@ -134,6 +146,7 @@ object SettingsStore {
             workMinutes = p.getInt(KEY_WORK, d.workMinutes),
             restSeconds = p.getInt(KEY_REST, d.restSeconds),
             dailyGoalMinutes = p.getInt(KEY_DAILY_GOAL, d.dailyGoalMinutes),
+            overdueRemindMinutes = p.getInt(KEY_OVERDUE_REMIND_MINUTES, d.overdueRemindMinutes),
             autoFullScreen = p.getBoolean(KEY_AUTO_FULL_SCREEN, d.autoFullScreen),
             dndEnabled = p.getBoolean(KEY_DND_ENABLED, d.dndEnabled),
             dndStartMinute = p.getInt(KEY_DND_START, d.dndStartMinute),
@@ -152,6 +165,7 @@ object SettingsStore {
             .putInt(KEY_WORK, settings.workMinutes)
             .putInt(KEY_REST, settings.restSeconds)
             .putInt(KEY_DAILY_GOAL, settings.dailyGoalMinutes)
+            .putInt(KEY_OVERDUE_REMIND_MINUTES, settings.overdueRemindMinutes)
             .putBoolean(KEY_AUTO_FULL_SCREEN, settings.autoFullScreen)
             .putBoolean(KEY_DND_ENABLED, settings.dndEnabled)
             .putInt(KEY_DND_START, settings.dndStartMinute)

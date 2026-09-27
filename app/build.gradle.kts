@@ -1,3 +1,5 @@
+import java.io.File
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
@@ -11,8 +13,8 @@ android {
         applicationId = "com.java.myapplication"
         minSdk = 24
         targetSdk = 35
-        versionCode = 29
-        versionName = "2.3.15"
+        versionCode = 30
+        versionName = "2.4.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -20,9 +22,32 @@ android {
         }
     }
 
+    signingConfigs {
+        create("local") {
+            // 仅用于本地产物交付（可直接安装的 APK）；凭据不存在时不影响其他构建。
+            // 优先级：环境变量 EYECARE_KEYSTORE > user.home > /root/.android/debug.keystore
+            val candidates = listOfNotNull(
+                System.getenv("EYECARE_KEYSTORE")?.let { File(it) },
+                System.getProperty("user.home")?.let { File(it, ".android/debug.keystore") },
+                File("/root/.android/debug.keystore"),
+            )
+            val ks = candidates.firstOrNull { it != null && it.exists() }
+            if (ks != null) {
+                storeFile = ks
+                storePassword = System.getenv("EYECARE_STORE_PASS") ?: "android"
+                keyAlias = System.getenv("EYECARE_KEY_ALIAS") ?: "androiddebugkey"
+                keyPassword = System.getenv("EYECARE_KEY_PASS") ?: "android"
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            val local = signingConfigs.findByName("local")
+            if (local != null && local.storeFile?.exists() == true) {
+                signingConfig = local
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

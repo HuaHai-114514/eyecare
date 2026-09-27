@@ -89,6 +89,14 @@ fun SettingsTab(viewModel: EyeCareViewModel, context: Context) {
             )
             Spacer(Modifier.height(16.dp))
             NumberSettingRow(
+                label = "超时二次提醒间隔",
+                unit = "分钟",
+                value = s.overdueRemindMinutes,
+                range = AppSettings.OVERDUE_REMIND_RANGE,
+                onCommit = { v -> update { it.copy(overdueRemindMinutes = v) } }
+            )
+            Spacer(Modifier.height(16.dp))
+            NumberSettingRow(
                 label = "每日用眼目标",
                 unit = "分钟",
                 value = s.dailyGoalMinutes,

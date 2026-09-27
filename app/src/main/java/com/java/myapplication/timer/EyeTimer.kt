@@ -22,6 +22,12 @@ import com.java.myapplication.ui.DndWindow
  * 2. 短暂息屏（< [LONG_OFF_RESET_MS]）视为「还在用」，回来后续算；
  *    长时间息屏视为「真正离开」，再次亮屏时用眼时长从 0 重新起算。
  * 3. 工作到点只发提醒通知，不自动开始休息；用户点通知的「开始休息」后才起算休息倒计时。
+ *
+ * 超时语义（v2.4.0）：
+ * 到点后若用户一直不开始休息，进入「超时用眼」态：
+ * - 超时时长**继续累计**并计入用眼统计（不再冻结在到点值）；
+ * - 每隔 [AppSettings.overdueRemindMinutes] 分钟重复提醒一次，直到开始休息；
+ * - 超时期间息屏 = 暂停累计 + 撤销超时闹钟；亮屏后若仍未休息则恢复超时累计与提醒。
  */
 object EyeTimer {
 
@@ -43,6 +49,10 @@ object EyeTimer {
 
     private fun restMs(context: Context): Long =
         SettingsStore.load(context).restSeconds * 1000L
+
+    /** 超时二次提醒间隔毫秒（v2.4.0） */
+    private fun overdueMs(context: Context): Long =
+        SettingsStore.load(context).overdueRemindMinutes * 60 * 1000L
 
     /** 当前周期已累计的亮屏用眼毫秒 = 已落盘累计 + 本次亮屏已过去时长 */
     fun elapsedMs(context: Context): Long {
@@ -81,6 +91,53 @@ object EyeTimer {
         StatsStore.addWorkSession(context, seconds)
     }
 
+    /**
+     * 结算「超时用眼」增量（v2.4.0）。
+     *
+     * 到点后未休息的时间里，累计值会超过 workMs。这里只把**超出到点值的部分**
+     * 写入统计，并用 [TimerState.overdueRecordedMs] 记录已结算的毫秒数去重，
+     * 避免每次 tick / 重复提醒把同一段时长反复计入。
+     */
+    private fun recordOverdue(context: Context, s: TimerState, at: Long) {
+        if (!s.overdueCounting) return
+        val curAccum = accumulatedAt(s, at)
+        val deltaSec = overdueDeltaSeconds(curAccum, workMs(context), s.overdueRecordedMs)
+        if (deltaSec < MIN_RECORD_SECONDS) return
+        StatsStore.addWorkSession(context, deltaSec)
+    }
+
+    /** 把「已落盘累计 + 本次亮屏已过去时长」算成当前总累计毫秒（纯函数，便于测试） */
+    internal fun accumulatedAt(s: TimerState, at: Long): Long =
+        if (s.screenOnAt > 0) {
+            s.workAccumMs + (at - s.screenOnAt).coerceAtLeast(0L)
+        } else {
+            s.workAccumMs
+        }
+
+    /**
+     * 计算应写入统计的「超时增量秒数」（纯函数，v2.4.0）。
+     *
+     * @param currentAccumMs 当前累计用眼毫秒（含超时）
+     * @param targetWorkMs 到点阀值（即设置的用眼间隔）
+     * @param alreadyRecordedMs 此前已结算过的超时毫秒（去重）
+     * @return 本次应新增计入统计的秒数（可能为 0）
+     */
+    internal fun overdueDeltaSeconds(
+        currentAccumMs: Long,
+        targetWorkMs: Long,
+        alreadyRecordedMs: Long
+    ): Int {
+        val overdueTotal = (currentAccumMs - targetWorkMs).coerceAtLeast(0L)
+        val delta = (overdueTotal - alreadyRecordedMs).coerceAtLeast(0L)
+        return (delta / 1000L).toInt()
+    }
+
+    /** 计算到 [at] 为止、已经结算并写入统计的超时毫秒数（用于去重落盘） */
+    private fun overdueRecordedAfter(context: Context, s: TimerState, at: Long): Long {
+        val curAccum = accumulatedAt(s, at)
+        return (curAccum - workMs(context)).coerceAtLeast(0L)
+    }
+
     /** 免打扰时段判断：避开免打扰，避免打扰用户 */
     private fun shouldNotify(context: Context): Boolean {
         val settings = SettingsStore.load(context)
@@ -100,7 +157,11 @@ object EyeTimer {
         if (!s.reminderEnabled) return
         if (s.phaseResting) return
         if (s.awaitingRest) {
-            TimerStore.save(context, s.copy(offAt = -1L))
+            // 超时用眼态：亮屏则恢复持续累计，并重排超时提醒闹钟（v2.4.0）
+            val t = now()
+            val resumed = if (s.screenOnAt > 0) s else s.copy(screenOnAt = t)
+            TimerStore.save(context, resumed.copy(offAt = -1L, overdueCounting = true))
+            AlarmScheduler.scheduleOverdueReminder(context, t + overdueMs(context))
             return
         }
 
@@ -154,8 +215,14 @@ object EyeTimer {
             AlarmScheduler.scheduleRestDeadline(context, s.restStart + restMs(context))
             return
         }
-        // 等待用户确认休息：保留通知，等用户回来处理
-        if (s.awaitingRest) return
+        // 等待用户确认休息（超时态）：息屏 = 暂停累计 + 撤销超时闹钟（v2.4.0）
+        if (s.awaitingRest) {
+            recordOverdue(context, s, t)
+            TimerStore.save(context, f.copy(offAt = t, overdueCounting = false,
+                overdueRecordedMs = overdueRecordedAfter(context, s, t)))
+            AlarmScheduler.cancelOverdueReminder(context)
+            return
+        }
 
         // 非唤醒兜底闹钟：只在设备下次醒来时投递，用于进程被杀后的校正（不耗电）
         val remaining = workMs(context) - elapsedMs(context)
@@ -197,16 +264,67 @@ object EyeTimer {
             return
         }
 
-        TimerStore.save(
-            context,
-            frozen(s, t).copy(workAccumMs = workMs, awaitingRest = true)
+        // 到点：进入「等待休息 + 超时累计」态。
+        // v2.4.0 起不再把累计冻结在 workMs，而是保留 screenOnAt 继续走动，
+        // 这样用户不休息期间的时间会照常累计并计入统计（修复统计漏算）。
+        val deadlineState = s.copy(
+            workAccumMs = workMs,
+            screenOnAt = t,
+            offAt = -1L,
+            awaitingRest = true,
+            overdueCounting = true,
+            overdueRecordedMs = 0L
         )
-        recordWorkSession(context, frozen(s, t))
+        TimerStore.save(context, deadlineState)
+        // 到点这一轮先结算到点前的 workMs
+        recordWorkSession(context, TimerState(workAccumMs = workMs))
         AlarmScheduler.cancelWorkAlarm(context)
+        // 排超时二次提醒（未休息则每 overdueMs 重复）
+        AlarmScheduler.scheduleOverdueReminder(context, t + overdueMs(context))
         if (notify && shouldNotify(context)) {
             // 一次 load 取两个值（原来 load 两次），并把真实间隔传给通知文案
             val settings = SettingsStore.load(context)
             RestNotifier.notifyRestReminder(context, settings.workMinutes, settings.restSeconds)
+        }
+    }
+
+    /**
+     * 超时二次提醒（v2.4.0）：到点后每 [AppSettings.overdueRemindMinutes] 分钟触发一次。
+     *
+     * 若用户仍未开始休息：再次弹通知提醒，并结算这段时间的超时时长入统计；
+     * 若已休息 / 已稍后再说 / 已息屏：什么都不做（闹钟已被各自的出口撤销）。
+     */
+    fun onOverdueReminder(context: Context) {
+        val s = TimerStore.load(context)
+        if (!s.reminderEnabled) return
+        if (s.phaseResting) return
+        if (!s.awaitingRest) return
+
+        val t = now()
+        // 息屏了：冻结并撤销超时闹钟，不打扰
+        if (!isScreenOn(context)) {
+            val f = frozen(s, t)
+            recordOverdue(context, s, t)
+            TimerStore.save(context, f.copy(offAt = t, overdueCounting = false,
+                overdueRecordedMs = overdueRecordedAfter(context, s, t)))
+            AlarmScheduler.cancelOverdueReminder(context)
+            return
+        }
+
+        // 结算这段超时时长入统计
+        recordOverdue(context, s, t)
+        TimerStore.save(context, s.copy(
+            screenOnAt = if (s.screenOnAt > 0) s.screenOnAt else t,
+            overdueCounting = true,
+            overdueRecordedMs = overdueRecordedAfter(context, s, t)
+        ))
+        // 继续排下一次超时提醒
+        AlarmScheduler.scheduleOverdueReminder(context, t + overdueMs(context))
+        if (shouldNotify(context)) {
+            val settings = SettingsStore.load(context)
+            val totalMin = (elapsedMs(context) / 60_000L).toInt()
+            val overdueMin = (totalMin - settings.workMinutes).coerceAtLeast(0)
+            RestNotifier.notifyOverdueReminder(context, overdueMin, totalMin)
         }
     }
 
@@ -215,16 +333,21 @@ object EyeTimer {
         val s = TimerStore.load(context)
         if (s.phaseResting) return
         val t = now()
+        // 超时态下开始休息：先把未结算的超时时长计入统计，再清标记
+        recordOverdue(context, s, t)
         TimerStore.save(
             context,
             frozen(s, t).copy(
                 phaseResting = true,
                 restStart = t,
                 awaitingRest = false,
+                overdueCounting = false,
+                overdueRecordedMs = 0L,
                 tipIndex = EyeTips.nextIndex(s.tipIndex)
             )
         )
         AlarmScheduler.cancelWorkAlarm(context)
+        AlarmScheduler.cancelOverdueReminder(context)
         AlarmScheduler.scheduleRestDeadline(context, t + restMs(context))
         RestNotifier.cancelReminder(context)
         // 清掉上一轮「休息结束」的痕迹，并掐掉可能还在响的提示音
@@ -284,17 +407,21 @@ object EyeTimer {
         val t = now()
         val screenOn = isScreenOn(context)
         recordWorkSession(context, frozen(s, t))
+        recordOverdue(context, s, t)
         TimerStore.save(
             context,
             s.copy(
                 phaseResting = false,
                 restStart = -1L,
                 awaitingRest = false,
+                overdueCounting = false,
+                overdueRecordedMs = 0L,
                 workAccumMs = 0L,
                 screenOnAt = if (screenOn) t else -1L,
                 offAt = if (screenOn) -1L else t
             )
         )
+        AlarmScheduler.cancelOverdueReminder(context)
         if (s.reminderEnabled && screenOn) {
             AlarmScheduler.scheduleWorkDeadline(context, t + workMs(context))
         } else {
@@ -317,12 +444,15 @@ object EyeTimer {
                 phaseResting = false,
                 restStart = -1L,
                 awaitingRest = false,
+                overdueCounting = false,
+                overdueRecordedMs = 0L,
                 workAccumMs = 0L,
                 screenOnAt = if (screenOn) t else -1L,
                 offAt = if (screenOn) -1L else t
             )
         )
         AlarmScheduler.cancelRestAlarm(context)
+        AlarmScheduler.cancelOverdueReminder(context)
         if (state.reminderEnabled && screenOn) {
             AlarmScheduler.scheduleWorkDeadline(context, t + workMs(context))
         } else {
@@ -345,6 +475,8 @@ object EyeTimer {
                     phaseResting = false,
                     restStart = -1L,
                     awaitingRest = false,
+                    overdueCounting = false,
+                    overdueRecordedMs = 0L,
                     workAccumMs = 0L,
                     screenOnAt = if (screenOn) t else -1L,
                     offAt = if (screenOn) -1L else t
@@ -391,10 +523,22 @@ object EyeTimer {
             return
         }
 
-        // 等待用户确认休息：保持提醒，无需闹钟
+        // 等待用户确认休息（超时态）：保持提醒，并恢复超时累计与循环闹钟
         if (s.awaitingRest) {
-            if (screenOn) TimerStore.save(context, s.copy(offAt = -1L))
             AlarmScheduler.cancelWorkAlarm(context)
+            if (screenOn) {
+                val resumed = if (s.screenOnAt > 0) s else s.copy(screenOnAt = t)
+                recordOverdue(context, resumed, t)
+                TimerStore.save(context, resumed.copy(offAt = -1L, overdueCounting = true,
+                    overdueRecordedMs = overdueRecordedAfter(context, resumed, t)))
+                AlarmScheduler.scheduleOverdueReminder(context, t + overdueMs(context))
+            } else {
+                val f = frozen(s, t)
+                recordOverdue(context, s, t)
+                TimerStore.save(context, f.copy(offAt = t, overdueCounting = false,
+                    overdueRecordedMs = overdueRecordedAfter(context, s, t)))
+                AlarmScheduler.cancelOverdueReminder(context)
+            }
             return
         }
 
