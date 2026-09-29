@@ -35,6 +35,7 @@ import com.java.myapplication.ui.components.DailyBarChart
 import com.java.myapplication.ui.components.EyeIcons
 import com.java.myapplication.ui.components.EyeProgressRing
 import com.java.myapplication.ui.theme.*
+import kotlin.math.roundToInt
 
 private enum class Tab { TIMER, REPORT, SETTINGS }
 
@@ -312,7 +313,10 @@ private fun ReportTab(viewModel: EyeCareViewModel, context: Context) {
     }
     LaunchedEffect(Unit) { refreshKey++ }
 
-    val labels = remember(stats) { stats.map { it.dayKey.substring(5) } } // MM-dd
+    // 横轴标签：用短格式「M/d」（如 9/1），比 MM-dd 更省宽度；
+    // 30 天档位下 30 个标签会挤成一片、数字被压坏（图 1 的乱码就是这么来的），
+    // 因此额外做「抽稀」：只保留少量关键刻度，其余留空，见下方 axisLabels。
+    val labels = remember(stats) { stats.map { shortDayLabel(it.dayKey) } } // M/d
     val workData = remember(stats) { stats.mapIndexed { i, s -> labels[i] to (s.workSeconds / 60) } }
     val restData = remember(stats) { stats.mapIndexed { i, s -> labels[i] to s.restCount } }
 
@@ -421,19 +425,12 @@ private fun ReportTab(viewModel: EyeCareViewModel, context: Context) {
                 data = workData,
                 secondData = restData
             )
-            Spacer(Modifier.height(10.dp))
-            Row(modifier = Modifier.fillMaxWidth()) {
-                stats.forEach { s ->
-                    Text(
-                        s.dayKey.substring(5),
-                        modifier = Modifier.weight(1f),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center,
-                        maxLines = 2
-                    )
-                }
-            }
+            Spacer(Modifier.height(6.dp))
+            // 横轴：不再「每个日期一个等宽槽位」（30 天时每格仅 ~11dp，
+            // "9/1" 会被截断成 "9"，就是之前看到的「只有月份没日期」）。
+            // 改为独立刻度行：按档位固定少量刻度（最多 6 个），每个刻度用
+            // 非等分排布，保证每个标签都有足够宽度完整显示。
+            DateAxis(stats = stats)
         }
 
         Spacer(Modifier.height(24.dp))
@@ -455,6 +452,74 @@ private fun LegendDot(color: androidx.compose.ui.graphics.Color, text: String) {
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+    }
+}
+
+/**
+ * 报告页横轴刻度行。
+ *
+ * 设计要点：横轴刻度**不按数据点数等分**，而是先按档位算出「最多几个刻度」，
+ * 再把整行等分成那么多个槽位。这样每个刻度都有约「屏宽 / 刻度数」的宽度，
+ * （30 天档位只放 6 个刻度，每个宽约 60dp），"9/1" 之类的短标签必然能完整显示，
+ * 彻底避开「N 个日期挤一行、每格十几 dp、数字被截断」的老毛病。
+ *
+ * 标签取「该刻度所代表日期」的短格式（M/d），刻度在时间轴上均匀分布，
+ * 首尾分别落在最早/最新一天，方便一眼看出区间。
+ */
+@Composable
+private fun DateAxis(stats: List<com.java.myapplication.data.DailyStat>) {
+    if (stats.isEmpty()) return
+    // 刻度数量：日/周每天一个，两周 4 个，月 6 个（足够看清区间又不拥挤）
+    val tickCount = when {
+        stats.size <= 7 -> stats.size
+        stats.size <= 14 -> 4
+        else -> 6
+    }
+    // 均匀取索引：在 [0, size-1] 上取 tickCount 个等距点（含首尾）
+    val lastIndex = stats.lastIndex
+    val ticks: List<Int> = if (tickCount <= 1) {
+        listOf(0)
+    } else {
+        (0 until tickCount).map { i ->
+            (lastIndex.toFloat() * i / (tickCount - 1)).roundToInt().coerceIn(0, lastIndex)
+        }.distinct()
+    }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        ticks.forEach { index ->
+            Text(
+                text = shortDayLabel(stats[index].dayKey),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                softWrap = false,
+                modifier = Modifier.padding(horizontal = 2.dp)
+            )
+        }
+    }
+}
+
+/**
+ * 把日期键 yyyy-MM-dd 转成短横轴标签「M/d」（如 2025-09-01 -> 9/1）。
+ *
+ * 为什么不再用 MM-dd：周/月档位下标签数量多、单标签宽度只有十几个 dp，
+ * 两位月 + 连字符 + 两位日在窄槽里会被逐字压缩（真机上表现为一串 0/9 的乱码）。
+ * M/d 少一个字符且去掉了补零，更容易在窄槽里完整显示。
+ *
+ * 解析失败时回退原始字符串，保证任何脏数据都不会导致崩溃。
+ */
+private fun shortDayLabel(dayKey: String): String {
+    // 期望格式 yyyy-MM-dd
+    if (dayKey.length < 10) return dayKey
+    return try {
+        val month = dayKey.substring(5, 7).trimStart('0').ifEmpty { "0" }
+        val day = dayKey.substring(8, 10).trimStart('0').ifEmpty { "0" }
+        "$month/$day"
+    } catch (_: Exception) {
+        dayKey
     }
 }
 

@@ -43,6 +43,8 @@ import com.java.myapplication.ui.components.EyeIcons
 @Composable
 fun SettingsTab(viewModel: EyeCareViewModel, context: Context) {
     var showDiagnostics by remember { mutableStateOf(false) }
+    // 「到点自动全屏」开启前的二次确认（v2.4.2）：开启后会打断其他应用，需用户明确知晓
+    var showFullScreenConfirm by remember { mutableStateOf(false) }
     val s = viewModel.settings
 
     // 统一提交入口：基于**当前最新**设置做变换后落盘，避免闭包捕获旧值互相覆盖
@@ -111,9 +113,13 @@ fun SettingsTab(viewModel: EyeCareViewModel, context: Context) {
         SettingsGroupCard(title = "提醒") {
             SwitchSettingRow(
                 title = "到点自动全屏",
-                subtitle = "用眼到点时直接弹出全屏休息页；关闭则只发通知横幅",
+                subtitle = "用眼到点时直接弹出全屏休息页（后台也不会漏）；关闭则只发通知横幅",
                 checked = s.autoFullScreen,
-                onChecked = { v -> update { it.copy(autoFullScreen = v) } }
+                // 关闭 → 直接生效；开启 → 先弹二次确认（明确告知会打断其他应用）
+                onChecked = { v ->
+                    if (v) showFullScreenConfirm = true
+                    else update { it.copy(autoFullScreen = false) }
+                }
             )
             Spacer(Modifier.height(16.dp))
             SwitchSettingRow(
@@ -223,7 +229,7 @@ fun SettingsTab(viewModel: EyeCareViewModel, context: Context) {
             )
             Spacer(Modifier.height(4.dp))
             Text(
-                "如果提醒不准时，按清单逐项检查通知权限、精确闹钟、全屏通知、电池优化与自启动",
+                "如果提醒不准时，按清单逐项检查通知权限、精确闹钟、悬浮窗（后台全屏）、电池优化与自启动",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -247,6 +253,30 @@ fun SettingsTab(viewModel: EyeCareViewModel, context: Context) {
 
     if (showDiagnostics) {
         DiagnosticsPanel(onDismiss = { showDiagnostics = false })
+    }
+
+    // 「到点自动全屏」二次确认（v2.4.2）：必须让用户明确知道会打断其他操作
+    if (showFullScreenConfirm) {
+        AlertDialog(
+            onDismissRequest = { showFullScreenConfirm = false },
+            title = { Text("开启「到点自动全屏」？") },
+            text = {
+                Text(
+                    "开启后，用眼到点时会在你正在使用的应用之上强制弹出全屏休息页，" +
+                        "可能打断正在进行的操作（如看视频、开会、导航）。\n\n" +
+                        "手机息屏或锁屏时不会弹出。是否确认开启？"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showFullScreenConfirm = false
+                    update { it.copy(autoFullScreen = true) }
+                }) { Text("确认开启") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showFullScreenConfirm = false }) { Text("取消") }
+            }
+        )
     }
 }
 

@@ -210,14 +210,35 @@ object StatsStore {
 
     /**
      * 结算一次「已完成的用眼时长」。
-     * 由 EyeTimer 在各出口调用（到点、稍后再说、结束休息等）。
+     * 由 EyeTimer 在各出口调用（到点、稍后再说、结束休息、息屏等）。
+     *
+     * v2.4.x 修复（第二轮）：语义从「跨天按比例切分」改为「**整段归属起点日**」。
+     *
+     * 为什么改：用户要的是「**每天 0 点，当日用眼统计从 0 重新累计**」。
+     * 旧实现把一段跨 0 点的时长劈成两半，导致 0 点之后「今日用眼」立刻继承了
+     * 昨天后半段，看起来像「没有在 0 点归零」。
+     *
+     * 新口径：整段时长记到**这段用眼开始的那一天**（[startWallMs] 所在日）：
+     * - 从昨天一直用到今天 0 点后：整段算昨天，今天的「今日用眼」从 0 起算；
+     * - 0 点之后新起的一段：起点在今天，自然全部算今天。
+     *
+     * 配合 [EyeTimer] 的「跨天切段」逻辑（0 点处先把已累计段结算掉、再重新起算），
+     * 「今日用眼」于是严格等于「当天 0:00 至今的用眼累计」，不会虚高。
      *
      * @param workSeconds 本次结算的用眼秒数
+     * @param startWallMs 本段用眼的**起始墙钟时间戳**（毫秒）；
+     *                    传 <=0 或省略时退化为「全部记到当前日期」（兼容旧调用）
      */
-    fun addWorkSession(context: Context, workSeconds: Int) {
+    fun addWorkSession(context: Context, workSeconds: Int, startWallMs: Long = -1L) {
         if (workSeconds <= 0) return
         val map = loadAll(context)
-        val key = dayKeyOf(System.currentTimeMillis())
+        val now = System.currentTimeMillis()
+
+        // 归属日：有合法起点就按起点日，否则按当前日（兼容旧调用）。
+        // 注意：起点晚于当前时刻（理论上不该出现）时也回退当前日，避免记到未来。
+        val validStart = startWallMs > 0L && startWallMs <= now
+        val key = if (validStart) dayKeyOf(startWallMs) else dayKeyOf(now)
+
         val cur = ensureDay(map, key)
         map[key] = cur.copy(
             workSeconds = cur.workSeconds + workSeconds,
@@ -225,6 +246,12 @@ object StatsStore {
         )
         saveAll(context, map)
     }
+
+    /**
+     * 给定墙钟时刻所在的日期键（yyyy-MM-dd），供上层做「跨天」判断。
+     * 与内部 [dayKeyOf] 口径一致，暴露成公开纯函数便于测试与调用。
+     */
+    fun dayKeyAt(time: Long): String = dayKeyOf(time)
 
     /** 记录一次完成的休息 */
     fun addRest(context: Context, restSeconds: Int) {

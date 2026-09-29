@@ -150,6 +150,10 @@ class EyeCareViewModel : ViewModel() {
 
     // 每秒界面刷新 + 休息结束兜底自愈（避免卡在 0 秒休息页）
     fun clockTick(context: Context) {
+        // 跨天归零：界面每秒 tick 是「0 点整」最直接的感知点，
+        // 到点即把昨天那段结算掉，让「今日用眼」从 0 重新累计。
+        EyeTimer.rollOverIfDayChanged(context, TimerStore.load(context), System.currentTimeMillis())
+            .let { TimerStore.save(context, it) }
         val s = TimerStore.load(context)
         if (s.phaseResting && s.restStart > 0) {
             val restSec = SettingsStore.load(context).restSeconds

@@ -169,8 +169,20 @@ object RestNotifier {
         // Android 14+ 该能力默认不授予普通应用（只给通话/闹钟类），所以必须先查权限：
         // 没权限时不再闭眼调用（系统会静默吞掉，用户只会觉得「这功能坏了」），
         // 降级为普通横幅，并在自检页引导用户去开启。
+        // A2：到点自动全屏弹出休息页。
+        // 关键：全屏 Intent 必须带 [ACTION_REST_NOW]，否则系统拉起 MainActivity 后只是
+        // 停回计时页（到点时状态是 awaitingRest），不会真正进入全屏休息页 ——
+        // 这正是历史上「到时自动全屏无效」的根因之一。
         if (settings.autoFullScreen && hasFullScreenPermission(context)) {
-            builder.setFullScreenIntent(contentPending, true)
+            val fullScreenPending = PendingIntent.getActivity(
+                context, 1007,
+                Intent(context, MainActivity::class.java).apply {
+                    action = ACTION_REST_NOW
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                },
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            builder.setFullScreenIntent(fullScreenPending, true)
         } else if (settings.autoFullScreen) {
             // 明确告知降级原因，避免用户误判为 Bug
             builder.setSubText("全屏提醒权限未开启，已降级为横幅提醒")
@@ -284,7 +296,15 @@ object RestNotifier {
             .setContentIntent(contentPending)
 
         if (settings.autoFullScreen && hasFullScreenPermission(context)) {
-            builder.setFullScreenIntent(contentPending, true)
+            val fullScreenPending = PendingIntent.getActivity(
+                context, 1007,
+                Intent(context, MainActivity::class.java).apply {
+                    action = ACTION_REST_NOW
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                },
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            builder.setFullScreenIntent(fullScreenPending, true)
         }
 
         val restPending = PendingIntent.getActivity(

@@ -28,6 +28,28 @@ README 只保留精简版的版本历史与更新日志简表；需要追溯细�
 | v2.3.14 | 28 | `01ab98d6879b622a89eba03059976713`（12,029,738 字节，debug） |
 | v2.3.15 | 29 | `4ab377a275c93b705e6fb634dc563bd7`（12,062,506 字节，debug） |
 | v2.4.0 | 30 | `c937b2ec574a61d486440f15e1166780`（8,131,039 字节，release 已签名） |
+| v2.4.1 | 31 | 横轴乱码临时修复版（未单独归档） |
+| v2.4.2 | 32 | 71cdb830d2a43e794cd9dae67ee8c8f8（12,095,602 字节，debug） |
+
+---
+## v2.4.2 改动摘要
+### 一、修复「到点自动全屏」在 Android 15/16 上失效（核心）
+**现象**：用眼计时正常、通知正常弹出，但到点后不会自动弹出全屏休息页（只有一条横幅）。亮屏、锁屏都无效。
+**根因（两层）**：
+1. **系统级行为变更**：Android 15（API 35）起，setFullScreenIntent 在亮屏解锁状态下不再自动拉起全屏界面，只退化成普通横幅（锁屏时才可能全屏）。这是系统行为，靠调通知参数无法绕过。
+2. **未声明悬浮窗权限**：AndroidManifest.xml 里根本没有 SYSTEM_ALERT_WINDOW，所以「应用详情」里看不到悬浮窗开关。
+**方案**：改用「悬浮窗权限 + 前台服务 + 自绘全屏 Overlay」：
+1. **notify/RestOverlayService.kt（新增）**：前台服务，用 WindowManager + TYPE_APPLICATION_OVERLAY 自绘全屏休息页（渐变背景 + 倒计时 + 护眼知识 + 按钮）。只在亮屏时弹；倒计时结束自动消失；可返回键/按钮提前结束。
+2. **AndroidManifest.xml**：新增 SYSTEM_ALERT_WINDOW、FOREGROUND_SERVICE、FOREGROUND_SERVICE_SPECIAL_USE 权限，注册 RestOverlayService。
+3. **AppForeground.kt（新增）**：@Volatile 前台标记，由 MainActivity.onResume/onPause 维护。
+4. **timer/EyeTimer.kt**：onWorkDeadline 到点时——开关关闭不动；息屏不动；前台→App 内休息页；后台亮屏有权限→beginRest + Overlay；无权限→降级横幅。各出口调用 RestOverlayService.stop() 防止残留叠层。
+5. **ui/SettingsTab.kt**：「到点自动全屏」开关开启前弹二次确认。
+6. **ui/DiagnosticsPanel.kt**：自检新增「悬浮窗（后台全屏）」项 + 授权引导。
+7. **notify/RestOverlayService.kt · ProgressRingView（补充修复）**：首版 Overlay 只画了静态倒计时大数字，漏了圆环进度条（App 内休息页有、后台覆盖没有，视觉不一致）。补上原生 Canvas 自绘的 ProgressRingView：轨道 + 从 12 点顺时针推进的进度弧，弧色随进度 绿→橙→红，与 Compose 端 EyeProgressRing 同一视觉语义；每秒随倒计时刷新。
+### 二、修复报告页横轴标签乱码（30 天档位）
+**根因**：横轴原为每个日期一个等宽槽位，30 天时每格仅约 11dp，9/1 被截断成 9。
+**修法**：新增独立刻度行 DateAxis，按档位固定少量刻度（月=6 个），SpaceBetween 排布、每格约 60dp，完整显示 M/d。
+
 
 ---
 

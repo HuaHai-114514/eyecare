@@ -18,6 +18,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.java.myapplication.notify.RestNotifier
+import com.java.myapplication.notify.RestOverlayService
 
 /**
  * 后台提醒自检（v2.3.6 新增）。
@@ -65,7 +66,7 @@ fun DiagnosticsPanel(onDismiss: () -> Unit) {
                     color = MaterialTheme.colorScheme.onSurface
                 )
                 Text(
-                    if (problems == 0) "五项检查全部通过 🌿" else "有 $problems 项需要注意",
+                    if (problems == 0) "全部检查通过 🌿" else "有 $problems 项需要注意",
                     style = MaterialTheme.typography.labelMedium,
                     color = if (problems == 0) MaterialTheme.colorScheme.primary
                     else MaterialTheme.colorScheme.error
@@ -151,7 +152,7 @@ private fun appDetailIntent(context: Context): Intent =
     Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
         .setData(Uri.parse("package:${context.packageName}"))
 
-/** 逐项采集五项检查的当前状态（v2.3.13 起 internal：自检面板与首次引导共用） */
+/** 逐项采集检查项当前状态（v2.3.13 起 internal：自检面板与首次引导共用） */
 internal fun collectDiagnostics(context: Context): List<DiagItem> {
     val pkg = context.packageName
     val list = mutableListOf<DiagItem>()
@@ -194,6 +195,20 @@ internal fun collectDiagnostics(context: Context): List<DiagItem> {
             else "未允许，「到点自动全屏」只会降级为横幅通知",
             actionLabel = if (canFull) null else "去开启",
             target = if (canFull) null else fullScreenIntentSettingsIntent(pkg)
+        )
+    )
+
+    // 3.5) 悬浮窗（Android 15/16 上后台亮屏强行全屏的唯一可靠途径）
+    // 系统设置里只有 Manifest 声明了 SYSTEM_ALERT_WINDOW 才会出现这个开关。
+    val canOverlay = RestOverlayService.canDrawOverlay(context)
+    list.add(
+        DiagItem(
+            title = "悬浮窗（后台全屏）",
+            ok = canOverlay,
+            detail = if (canOverlay) "已允许，亮屏时在别的应用里也能全屏弹出休息页"
+            else "未允许，在别的应用里到点无法全屏，只能横幅提醒",
+            actionLabel = if (canOverlay) null else "去开启",
+            target = if (canOverlay) null else RestOverlayService.overlayPermissionIntent(context)
         )
     )
 

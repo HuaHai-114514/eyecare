@@ -2,6 +2,7 @@ package com.java.myapplication.timer
 
 import android.content.Context
 import android.os.PowerManager
+import com.java.myapplication.AppForeground
 import com.java.myapplication.data.AppSettings
 import com.java.myapplication.data.EyeTips
 import com.java.myapplication.data.SettingsStore
@@ -9,6 +10,7 @@ import com.java.myapplication.data.StatsStore
 import com.java.myapplication.data.TimerState
 import com.java.myapplication.data.TimerStore
 import com.java.myapplication.notify.RestNotifier
+import com.java.myapplication.notify.RestOverlayService
 import com.java.myapplication.notify.RestSoundPlayer
 import com.java.myapplication.notify.RestVibrator
 import com.java.myapplication.ui.DndWindow
@@ -84,11 +86,72 @@ object EyeTimer {
      *
      * @param state 结算前的计时状态快照
      */
+    // ==================== 跨天归零（v2.4.x 第二轮） ====================
+
+    /** 某时刻所在日的 00:00:00.000 时间戳（本地时区） */
+    private fun dayStartOf(time: Long): Long {
+        val cal = java.util.Calendar.getInstance()
+        cal.timeInMillis = time
+        cal.set(java.util.Calendar.HOUR_OF_DAY, 0)
+        cal.set(java.util.Calendar.MINUTE, 0)
+        cal.set(java.util.Calendar.SECOND, 0)
+        cal.set(java.util.Calendar.MILLISECOND, 0)
+        return cal.timeInMillis
+    }
+
+    /**
+     * 跨天归零：若当前累计段的**起点**与现在不在同一天，
+     * 则把 [0 点之前] 的部分结算落盘（它属于昨天），并把累计值归零、
+     * 段起点重置为「今天的 0 点」，使 0 点之后的时间从新的一天重新累计。
+     *
+     * 语义目标（用户诉求）：**每天 0 点，当日用眼统计从 0 重新累计**。
+     *
+     * 返回**可能被更新过**的状态；调用方应当用返回值覆盖自己的 local state，
+     * 再基于新状态继续。若未跨天则原样返回。
+     *
+     * 注意：本函数会就地落盘并写统计，因此只应在「结算类」出口调用
+     * （onScreenOn / onWorkDeadline / beginRest / finishRest / postponeRest /
+     *  resync / 界面 tick）。
+     */
+    internal fun rollOverIfDayChanged(context: Context, s: TimerState, at: Long): TimerState {
+        // 段起点未知：无法判断，原样返回（兼容旧数据）
+        val segStart = s.accumStartWallMs
+        if (segStart <= 0L) return s
+        // 同一自然日：无需归零
+        if (StatsStore.dayKeyAt(segStart) == StatsStore.dayKeyAt(at)) return s
+
+        // 跨天了：先把「段起点 → 今天 0 点」这段的有效用眼结算到起点日。
+        // 用比例：有效用眼 = 该墙钟子区间占整段墙钟跨度的比例 × 当前累计。
+        val todayStart = dayStartOf(at)
+        val curAccum = accumulatedAt(s, at)
+        val fullSpan = (at - segStart).coerceAtLeast(1L)
+        val beforeSpan = (todayStart - segStart).coerceIn(0L, fullSpan)
+        val beforeMs = (curAccum.toDouble() * (beforeSpan.toDouble() / fullSpan.toDouble())).toLong()
+        val beforeSec = (beforeMs / 1000L).toInt()
+        if (beforeSec >= MIN_RECORD_SECONDS) {
+            // 归属起点日：整段（0 点前的这一截）记到昨天
+            StatsStore.addWorkSession(context, beforeSec, startWallMs = segStart)
+        }
+
+        // 归零并从「今天 0 点」重新起算：
+        // - workAccumMs 只保留 0 点之后到 at 的用量（即 curAccum - beforeMs）
+        // - screenOnAt 若之前 >0（正在累计）则保持「正在累计」：设为 at
+        // - 段起点重置为「今天 0 点」
+        val afterMs = (curAccum - beforeMs).coerceAtLeast(0L)
+        return s.copy(
+            workAccumMs = afterMs,
+            screenOnAt = if (s.screenOnAt > 0) at else -1L,
+            accumStartWallMs = todayStart
+        )
+    }
+
     private fun recordWorkSession(context: Context, state: TimerState) {
         val seconds = (state.workAccumMs / 1000L).toInt()
         // 过滤掉抖动产生的一两秒噪声
         if (seconds < MIN_RECORD_SECONDS) return
-        StatsStore.addWorkSession(context, seconds)
+        // v2.4.x：带本段累计的墙钟起点，让跨 0 点的时长能按天切分到各自日期。
+        // 起点未知(-1)时传入 -1，StatsStore 会退化为「全部记到当天」（兼容旧数据）。
+        StatsStore.addWorkSession(context, seconds, startWallMs = state.accumStartWallMs)
     }
 
     /**
@@ -103,7 +166,10 @@ object EyeTimer {
         val curAccum = accumulatedAt(s, at)
         val deltaSec = overdueDeltaSeconds(curAccum, workMs(context), s.overdueRecordedMs)
         if (deltaSec < MIN_RECORD_SECONDS) return
-        StatsStore.addWorkSession(context, deltaSec)
+        // 超时段的墙钟起点：上回到点时刻（screenOnAt，到点时被重置为到点时刻），
+        // 若未知则用本段累计起点兜底。
+        val overdueStart = if (s.screenOnAt > 0) s.screenOnAt else s.accumStartWallMs
+        StatsStore.addWorkSession(context, deltaSec, startWallMs = overdueStart)
     }
 
     /** 把「已落盘累计 + 本次亮屏已过去时长」算成当前总累计毫秒（纯函数，便于测试） */
@@ -153,9 +219,11 @@ object EyeTimer {
      * - 新会话：长时间离开则清零重算，短暂息屏则续算剩余时间。
      */
     fun onScreenOn(context: Context) {
-        val s = TimerStore.load(context)
+        var s = TimerStore.load(context)
         if (!s.reminderEnabled) return
         if (s.phaseResting) return
+        // 跨天：亮屏时先把昨天那段结算掉、今天从 0 重新累计
+        s = rollOverIfDayChanged(context, s, now()).also { if (it !== s) TimerStore.save(context, it) }
         if (s.awaitingRest) {
             // 超时用眼态：亮屏则恢复持续累计，并重排超时提醒闹钟（v2.4.0）
             val t = now()
@@ -183,8 +251,9 @@ object EyeTimer {
 
         val leftLong = s.offAt > 0 && t - s.offAt >= LONG_OFF_RESET_MS
         if (leftLong || s.workAccumMs <= 0L) {
-            // 真正离开过：从 0 起算
-            TimerStore.save(context, s.copy(workAccumMs = 0L, screenOnAt = t, offAt = -1L))
+            // 真正离开过：从 0 起算（新段起点 = 本次亮屏时刻）
+            TimerStore.save(context, s.copy(workAccumMs = 0L, screenOnAt = t, offAt = -1L,
+                accumStartWallMs = t))
             AlarmScheduler.scheduleWorkDeadline(context, t + workMs)
         } else {
             // 短暂息屏：续算剩余时间
@@ -243,10 +312,12 @@ object EyeTimer {
      * @param notify false 时只切换到「等待休息」状态而不发通知
      */
     fun onWorkDeadline(context: Context, notify: Boolean = true) {
-        val s = TimerStore.load(context)
+        var s = TimerStore.load(context)
         if (!s.reminderEnabled) return
         if (s.phaseResting) return
         if (s.awaitingRest) return
+        // 跨天：到点处理前先归零（若从昨天用到今天，昨天那段记到昨天）
+        s = rollOverIfDayChanged(context, s, now()).also { if (it !== s) TimerStore.save(context, it) }
 
         val t = now()
         val workMs = workMs(context)
@@ -273,7 +344,10 @@ object EyeTimer {
             offAt = -1L,
             awaitingRest = true,
             overdueCounting = true,
-            overdueRecordedMs = 0L
+            overdueRecordedMs = 0L,
+            // 到点前的那段在下一行被 recordWorkSession 结算；
+            // 之后累计的「超时段」从 t 起算，故段起点重置为 t。
+            accumStartWallMs = t
         )
         TimerStore.save(context, deadlineState)
         // 到点这一轮先结算到点前的 workMs
@@ -285,6 +359,29 @@ object EyeTimer {
             // 一次 load 取两个值（原来 load 两次），并把真实间隔传给通知文案
             val settings = SettingsStore.load(context)
             RestNotifier.notifyRestReminder(context, settings.workMinutes, settings.restSeconds)
+        }
+        // v2.4.2 到点强制全屏：改用「悬浮窗」绕开 Android 15/16 对全屏通知的限制。
+        // 语义 = 「到点不等用户点击，直接开始休息并全屏展示」。
+        // 触发条件与产品约定严格一致：
+        //   - 开关关闭            → 不动（维持上面已发的「等待确认休息」横幅）
+        //   - 息屏/锁屏           → 不动（屏没亮谈不上护眼）
+        //   - App 在前台          → 直接 beginRest，由 App 内休息页渲染倒计时
+        //   - App 在后台 + 亮屏   → beginRest + 后台全屏 Overlay 盖住其他应用
+        val autoSettings = SettingsStore.load(context)
+        if (autoSettings.autoFullScreen && isScreenOn(context)) {
+            if (AppForeground.isForeground) {
+                // 前台：自动进入休息，Compose 会随状态切成休息页
+                beginRest(context)
+                RestOverlayService.stop(context)
+            } else if (RestOverlayService.canDrawOverlay(context)) {
+                // 后台亮屏且有悬浮窗权限：先真正开始休息（写状态机），再叠全屏覆盖
+                beginRest(context)
+                RestOverlayService.startIfScreenOn(
+                    context, autoSettings.restSeconds, TimerStore.load(context).tipIndex
+                )
+            }
+            // 后台但无悬浮窗权限：降级——保持横幅（onWorkDeadline 上方已发），
+            // 用户可在自检页授权后重测；不动状态机，避免「无 UI 却已在休息」。
         }
     }
 
@@ -330,8 +427,10 @@ object EyeTimer {
 
     /** 进入休息（用户点通知按钮 / App 内「现在休息一下」）——此时才开始休息倒计时 */
     fun beginRest(context: Context) {
-        val s = TimerStore.load(context)
+        var s = TimerStore.load(context)
         if (s.phaseResting) return
+        // 跨天：开始休息前先归零（避免昨天那段随休息一并结算到新的一天）
+        s = rollOverIfDayChanged(context, s, now()).also { if (it !== s) TimerStore.save(context, it) }
         val t = now()
         // 超时态下开始休息：先把未结算的超时时长计入统计，再清标记
         recordOverdue(context, s, t)
@@ -350,6 +449,8 @@ object EyeTimer {
         AlarmScheduler.cancelOverdueReminder(context)
         AlarmScheduler.scheduleRestDeadline(context, t + restMs(context))
         RestNotifier.cancelReminder(context)
+        // 已在休息：撤掉可能还盖着的后台全屏覆盖，避免和 App 内休息页叠两层
+        RestOverlayService.stop(context)
         // 清掉上一轮「休息结束」的痕迹，并掐掉可能还在响的提示音
         RestNotifier.cancelRestEnd(context)
         RestSoundPlayer.stop()
@@ -357,7 +458,7 @@ object EyeTimer {
 
     /** 休息自然结束：记录统计、提示音收尾并衔接下一个用眼周期 */
     fun finishRest(context: Context) {
-        val s = TimerStore.load(context)
+        val s = rollOverIfDayChanged(context, TimerStore.load(context), now())
         // 幂等闸门：休息页 ticker 到点与 ACTION_REST_DONE 闹钟可能同时到达，
         // 先到者落盘 phaseResting=false，后到者直接返回 —— 这也是「只响一声」的根本保证。
         if (!s.phaseResting) return
@@ -402,7 +503,8 @@ object EyeTimer {
 
     /** 忽略提醒 / 稍后再说：清掉提醒状态，重新起算一个用眼周期 */
     fun postponeRest(context: Context) {
-        val s = TimerStore.load(context)
+        val s0 = TimerStore.load(context)
+        val s = rollOverIfDayChanged(context, s0, now())
         RestNotifier.cancelReminder(context)
         val t = now()
         val screenOn = isScreenOn(context)
@@ -418,10 +520,13 @@ object EyeTimer {
                 overdueRecordedMs = 0L,
                 workAccumMs = 0L,
                 screenOnAt = if (screenOn) t else -1L,
-                offAt = if (screenOn) -1L else t
+                offAt = if (screenOn) -1L else t,
+                accumStartWallMs = if (screenOn) t else -1L
             )
         )
         AlarmScheduler.cancelOverdueReminder(context)
+        // 稍后再说 / 忽略：若正盖着后台全屏，一并收起
+        RestOverlayService.stop(context)
         if (s.reminderEnabled && screenOn) {
             AlarmScheduler.scheduleWorkDeadline(context, t + workMs(context))
         } else {
@@ -448,11 +553,14 @@ object EyeTimer {
                 overdueRecordedMs = 0L,
                 workAccumMs = 0L,
                 screenOnAt = if (screenOn) t else -1L,
-                offAt = if (screenOn) -1L else t
+                offAt = if (screenOn) -1L else t,
+                accumStartWallMs = if (screenOn) t else -1L
             )
         )
         AlarmScheduler.cancelRestAlarm(context)
         AlarmScheduler.cancelOverdueReminder(context)
+        // 退出休息态：收起后台全屏覆盖（自然结束 / 手动结束 都汇聚到这里）
+        RestOverlayService.stop(context)
         if (state.reminderEnabled && screenOn) {
             AlarmScheduler.scheduleWorkDeadline(context, t + workMs(context))
         } else {
@@ -479,7 +587,8 @@ object EyeTimer {
                     overdueRecordedMs = 0L,
                     workAccumMs = 0L,
                     screenOnAt = if (screenOn) t else -1L,
-                    offAt = if (screenOn) -1L else t
+                    offAt = if (screenOn) -1L else t,
+                    accumStartWallMs = if (screenOn) t else -1L
                 )
             )
             if (screenOn) {
@@ -499,7 +608,7 @@ object EyeTimer {
      * 应用冷启动、回到前台、设备重启后调用。
      */
     fun resync(context: Context, notifyMissed: Boolean) {
-        val s = TimerStore.load(context)
+        var s = TimerStore.load(context)
         if (!s.reminderEnabled) {
             RestNotifier.cancelReminder(context)
             TimerStore.save(context, TimerState(reminderEnabled = false))
@@ -508,6 +617,11 @@ object EyeTimer {
         }
 
         val t = now()
+        // 跨天：自愈前先把昨天那段归零结算
+        run {
+            val rolled = rollOverIfDayChanged(context, s, t)
+            if (rolled !== s) { TimerStore.save(context, rolled); s = rolled }
+        }
         val workMs = workMs(context)
         val restMs = restMs(context)
         val screenOn = isScreenOn(context)
@@ -556,7 +670,8 @@ object EyeTimer {
         if (s.screenOnAt <= 0) {
             val leftLong = s.offAt > 0 && t - s.offAt >= LONG_OFF_RESET_MS
             if (leftLong || s.workAccumMs <= 0L) {
-                TimerStore.save(context, s.copy(workAccumMs = 0L, screenOnAt = t, offAt = -1L))
+                TimerStore.save(context, s.copy(workAccumMs = 0L, screenOnAt = t, offAt = -1L,
+                    accumStartWallMs = t))
                 AlarmScheduler.scheduleWorkDeadline(context, t + workMs)
                 return
             }

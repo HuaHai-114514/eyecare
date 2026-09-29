@@ -46,7 +46,12 @@ object RestVibrator {
                 val effect = VibrationEffect.createOneShot(
                     VIBRATE_MS, VibrationEffect.DEFAULT_AMPLITUDE
                 )
-                vibrateWithUsage(vibrator, effect)
+                // 先按「通知」用途振；若该用途被系统设置忽略、没振成，
+                // 再退回不带用途的原始重载（默认按触摸用途）做最后兜底。
+                // 这样即使系统里「通知振动」关着，也还能振一下，不至于毫无反馈。
+                if (!vibrateWithUsage(vibrator, effect)) {
+                    vibrateDefault(vibrator, effect)
+                }
             } else {
                 @Suppress("DEPRECATION")
                 vibrator.vibrate(VIBRATE_MS)
@@ -56,32 +61,53 @@ object RestVibrator {
         }
     }
 
-    /** 按系统版本选择带「通知」用途的振动重载 */
-    private fun vibrateWithUsage(vibrator: Vibrator, effect: VibrationEffect) {
-        when {
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> vibrator.vibrate(
-                effect,
-                VibrationAttributes.createForUsage(VibrationAttributes.USAGE_NOTIFICATION)
-            )
-            else -> {
-                @Suppress("DEPRECATION")
-                vibrator.vibrate(
+    /**
+     * 按系统版本选择带「通知」用途的振动重载。
+     * @return true 表示重载调用未抛异常（不代表系统一定真的振了，仅用于决定是否兜底）
+     */
+    private fun vibrateWithUsage(vibrator: Vibrator, effect: VibrationEffect): Boolean {
+        return try {
+            when {
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> vibrator.vibrate(
                     effect,
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_NOTIFICATION)
-                        .build()
+                    VibrationAttributes.createForUsage(VibrationAttributes.USAGE_NOTIFICATION)
                 )
+                else -> {
+                    @Suppress("DEPRECATION")
+                    vibrator.vibrate(
+                        effect,
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                            .build()
+                    )
+                }
             }
+            true
+        } catch (_: Exception) {
+            false
         }
     }
 
-    /** API 31+ 走 VibratorManager，更低版本走老接口 */
-    private fun resolveVibrator(context: Context): Vibrator? =
+    /** 最后兜底：不带任何用途的原始振动重载（默认触摸用途） */
+    private fun vibrateDefault(vibrator: Vibrator, effect: VibrationEffect) {
+        try {
+            vibrator.vibrate(effect)
+        } catch (_: Exception) {
+        }
+    }
+
+    /**
+     * API 31+ 优先走 VibratorManager；若拿不到（部分 ROM 会返回 null）
+     * 则回退老的 VIBRATOR_SERVICE，避免「拿不到服务 → 直接不震」。
+     */
+    private fun resolveVibrator(context: Context): Vibrator? {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
-            vm?.defaultVibrator
-        } else {
-            @Suppress("DEPRECATION")
-            context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+            val v = vm?.defaultVibrator
+            if (v != null) return v
+            // 回退：仍尝试老接口（部分 ROM VibratorManager 不可用）
         }
+        @Suppress("DEPRECATION")
+        return context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+    }
 }

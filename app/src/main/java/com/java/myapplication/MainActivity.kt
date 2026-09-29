@@ -49,12 +49,16 @@ class MainActivity : ComponentActivity() {
     // 回到前台：自愈补齐后台期间流逝的时间 + 立即刷新读数 + 恢复界面刷新协程
     override fun onResume() {
         super.onResume()
+        // 标记前台：到点时据此判断该走「App 内休息页」而非后台悬浮窗（v2.4.2）
+        AppForeground.isForeground = true
         viewModel.onForeground(this)
     }
 
     // 退到后台：停掉界面刷新协程；计时由亮/灭屏广播与系统闹钟接管
     override fun onPause() {
         super.onPause()
+        // 标记后台：到点将改用悬浮窗强制全屏（v2.4.2）
+        AppForeground.isForeground = false
         viewModel.onBackground()
     }
 }

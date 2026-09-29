@@ -17,6 +17,14 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- 休息结束提示音的短振动（v2.3.8 新增）。普通权限，安装即授予，不弹框 -->
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- 到点强制全屏（v2.4.2）：Android 15/16 上全屏通知在亮屏时已不生效，
+         改用「悬浮窗」在任意应用之上直接叠加全屏休息页。需用户在系统设置里单独授权。 -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- 承载悬浮窗的前台服务（仅休息倒计时期间短暂存活，不常驻） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"
+        tools:targetApi="34" />
 
     <application
         android:name=".EyeCareApplication"
@@ -42,6 +50,15 @@
             </intent-filter>
         </activity>
 
+        <!-- 到点强制全屏：亮屏时在任意应用之上叠加全屏休息页（v2.4.2） -->
+        <service
+            android:name=".notify.RestOverlayService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="到点强制全屏休息提醒，仅在休息倒计时期间短暂运行" />
+        </service>
         <!-- 后台到点闹钟：工作到点发休息提醒 / 休息到点衔接下一周期 -->
         <receiver
             android:name=".timer.TimerReceiver"

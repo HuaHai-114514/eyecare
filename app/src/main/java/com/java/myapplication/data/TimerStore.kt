@@ -27,7 +27,15 @@ data class TimerState(
     /** 已到点等待休息期间，超时累计是否已在走动（true 表示超时时长正在计入统计） */
     val overdueCounting: Boolean = false,
     /** 超时累计已结算并写入统计的毫秒数（避免重复计入） */
-    val overdueRecordedMs: Long = 0L
+    val overdueRecordedMs: Long = 0L,
+
+    // ============ v2.4.x：跨天统计修复 ============
+    /**
+     * 当前 [workAccumMs] 这段累计的「墙钟起点」（本段用眼实际开始的时刻）。
+     * 用于结算统计时把**跨越 0 点**的时长按天切分到各自日期。
+     * -1 表示未知（退化为全部记到结算当天，兼容旧数据）。
+     */
+    val accumStartWallMs: Long = -1L
 )
 
 object TimerStore {
@@ -43,6 +51,8 @@ object TimerStore {
     // v2.4.0
     private const val KEY_OVERDUE_COUNTING = "overdue_counting"
     private const val KEY_OVERDUE_RECORDED_MS = "overdue_recorded_ms"
+    // v2.4.x
+    private const val KEY_ACCUM_START_WALL_MS = "accum_start_wall_ms"
 
     private fun prefs(context: Context): SharedPreferences =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -59,7 +69,8 @@ object TimerStore {
             restStart = p.getLong(KEY_REST_START, -1L),
             tipIndex = p.getInt(KEY_TIP_INDEX, -1),
             overdueCounting = p.getBoolean(KEY_OVERDUE_COUNTING, false),
-            overdueRecordedMs = p.getLong(KEY_OVERDUE_RECORDED_MS, 0L)
+            overdueRecordedMs = p.getLong(KEY_OVERDUE_RECORDED_MS, 0L),
+            accumStartWallMs = p.getLong(KEY_ACCUM_START_WALL_MS, -1L)
         )
     }
 
@@ -75,6 +86,7 @@ object TimerStore {
             .putInt(KEY_TIP_INDEX, state.tipIndex)
             .putBoolean(KEY_OVERDUE_COUNTING, state.overdueCounting)
             .putLong(KEY_OVERDUE_RECORDED_MS, state.overdueRecordedMs)
+            .putLong(KEY_ACCUM_START_WALL_MS, state.accumStartWallMs)
             .apply()
     }
 }
