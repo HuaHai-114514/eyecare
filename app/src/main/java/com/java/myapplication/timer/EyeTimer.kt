@@ -22,19 +22,27 @@ import com.java.myapplication.ui.DndWindow
  * 1. 只累计「亮屏使用」的时长：亮屏开始计时，息屏立即暂停累计并撤销到点闹钟
  *    （息屏期间不持有任何唤醒源，零唤醒、最省电）。
  * 2. 短暂息屏（< [LONG_OFF_RESET_MS]）视为「还在用」，回来后续算；
- *    长时间息屏视为「真正离开」，再次亮屏时用眼时长从 0 重新起算。
+ *    达到 [LONG_OFF_RESET_MS]（1 分钟）的息屏视为「真正离开」，再次亮屏时用眼时长从 0 重新起算，
+ *    并且**连同「已到点未休息」的超时态一并作废**（用户诉求：放下手机不该被判超时）。
  * 3. 工作到点只发提醒通知，不自动开始休息；用户点通知的「开始休息」后才起算休息倒计时。
  *
- * 超时语义（v2.4.0）：
+ * 超时语义（v2.4.0，v2.4.3 收紧）：
  * 到点后若用户一直不开始休息，进入「超时用眼」态：
  * - 超时时长**继续累计**并计入用眼统计（不再冻结在到点值）；
  * - 每隔 [AppSettings.overdueRemindMinutes] 分钟重复提醒一次，直到开始休息；
- * - 超时期间息屏 = 暂停累计 + 撤销超时闹钟；亮屏后若仍未休息则恢复超时累计与提醒。
+ * - 超时提醒**只在亮屏且持续未休息时**才发；息屏即冻结并撤销超时闹钟，
+ *   若息屏达到 [LONG_OFF_RESET_MS] 则亮屏后清空用眼计时与超时态，从 0 重新起算。
  */
 object EyeTimer {
 
-    /** 息屏超过该时长视为「真正离开」，再次亮屏时累计清零（可调） */
-    const val LONG_OFF_RESET_MS = 5 * 60 * 1000L
+    /**
+     * 息屏达到该时长视为「真正离开」，再次亮屏时累计清零并重新起算。
+     *
+     * v2.4.3 起由 5 分钟收紧为 1 分钟（用户反馈：放下手机再回来不该续算，
+     * 更不该把息屏期间判成「超时未休息」）；短于该阈值的息屏仍视为短暂离开，
+     * 回来后续算剩余时间，避免抬手看时间就毁掉进度。
+     */
+    const val LONG_OFF_RESET_MS = 1 * 60 * 1000L
 
     /** 低于该秒数的用眼片段视为抖动噪声，不计入统计 */
     private const val MIN_RECORD_SECONDS = 5
@@ -214,9 +222,10 @@ object EyeTimer {
 
     /**
      * 亮屏（含解锁）：
-     * - 休息或等待确认休息中：不打断；
+     * - 休息中：不打断；
      * - 同一亮屏会话（进程重启等）：继续累计，仅确保闹钟存在；
-     * - 新会话：长时间离开则清零重算，短暂息屏则续算剩余时间。
+     * - 新会话：达到 [LONG_OFF_RESET_MS] 的息屏视为「真正离开」→ 清零重算，
+     *   并作废「到点未休息」的超时态；短于阈值则续算剩余时间。
      */
     fun onScreenOn(context: Context) {
         var s = TimerStore.load(context)
@@ -224,16 +233,26 @@ object EyeTimer {
         if (s.phaseResting) return
         // 跨天：亮屏时先把昨天那段结算掉、今天从 0 重新累计
         s = rollOverIfDayChanged(context, s, now()).also { if (it !== s) TimerStore.save(context, it) }
+
+        val t = now()
+
+        // 本次息屏是否已达「真正离开」阈值
+        val leftLong = s.offAt > 0 && t - s.offAt >= LONG_OFF_RESET_MS
+
         if (s.awaitingRest) {
-            // 超时用眼态：亮屏则恢复持续累计，并重排超时提醒闹钟（v2.4.0）
-            val t = now()
-            val resumed = if (s.screenOnAt > 0) s else s.copy(screenOnAt = t)
-            TimerStore.save(context, resumed.copy(offAt = -1L, overdueCounting = true))
-            AlarmScheduler.scheduleOverdueReminder(context, t + overdueMs(context))
+            if (leftLong) {
+                // 息屏够久 = 用户已放下手机：作废「到点未休息」，
+                // 清空用眼计时与超时态，亮屏后从 0 安静重新起算（不再弹超时）。
+                resetToFreshCycle(context, t)
+            } else {
+                // 短暂息屏后回来仍未休息：恢复超时累计并重排超时提醒（v2.4.0）
+                val resumed = if (s.screenOnAt > 0) s else s.copy(screenOnAt = t)
+                TimerStore.save(context, resumed.copy(offAt = -1L, overdueCounting = true))
+                AlarmScheduler.scheduleOverdueReminder(context, t + overdueMs(context))
+            }
             return
         }
 
-        val t = now()
         val workMs = workMs(context)
         val elapsed = elapsedMs(context)
 
@@ -249,7 +268,6 @@ object EyeTimer {
             return
         }
 
-        val leftLong = s.offAt > 0 && t - s.offAt >= LONG_OFF_RESET_MS
         if (leftLong || s.workAccumMs <= 0L) {
             // 真正离开过：从 0 起算（新段起点 = 本次亮屏时刻）
             TimerStore.save(context, s.copy(workAccumMs = 0L, screenOnAt = t, offAt = -1L,
@@ -262,7 +280,39 @@ object EyeTimer {
         }
     }
 
-    /** 息屏：暂停累计并撤销到点闹钟（息屏期间不唤醒设备） */
+    /**
+     * 清空用眼计时与「到点未休息」超时态，从 [t] 起算一个全新周期。
+     *
+     * 用于「息屏达到 [LONG_OFF_RESET_MS] 后亮屏」：用户已经离开过，
+     * 上一轮的到点欠账与超时一律作废，亮屏后安静地重新计时。
+     * 会撤销到点 / 超时闹钟，并按需重排新的到点闹钟（由调用方屏幕状态决定）。
+     */
+    private fun resetToFreshCycle(context: Context, t: Long) {
+        TimerStore.save(
+            context,
+            TimerState(
+                reminderEnabled = true,
+                phaseResting = false,
+                awaitingRest = false,
+                workAccumMs = 0L,
+                screenOnAt = t,
+                offAt = -1L,
+                accumStartWallMs = t
+            )
+        )
+        AlarmScheduler.cancelOverdueReminder(context)
+        RestNotifier.cancelReminder(context)
+        RestOverlayService.stop(context)
+        AlarmScheduler.scheduleWorkDeadline(context, t + workMs(context))
+    }
+
+    /**
+     * 息屏：暂停累计并撤销到点闹钟（息屏期间不唤醒设备）。
+     *
+     * v2.4.3 起：息屏时若处于「到点未休息」的超时态，先把超时时长结算入统计，
+     * 再**清掉超时标记**（不再等亮屏时恢复）——亮屏时由 [onScreenOn] 依据
+     * 息屏时长决定「续算」还是「清零重算」，从根本上杜绝息屏后亮屏误弹超时。
+     */
     fun onScreenOff(context: Context) {
         val s = TimerStore.load(context)
         if (!s.reminderEnabled) {
@@ -284,7 +334,10 @@ object EyeTimer {
             AlarmScheduler.scheduleRestDeadline(context, s.restStart + restMs(context))
             return
         }
-        // 等待用户确认休息（超时态）：息屏 = 暂停累计 + 撤销超时闹钟（v2.4.0）
+        // 等待用户确认休息（超时态）：结算超时时长 + 冻结累计 + 撤销超时闹钟。
+        // 这里保留 awaitingRest 落盘、但关掉 overdueCounting（息屏期间不再累计超时、
+        // 也不再重复提醒）；是否作废该状态交由亮屏时按息屏时长判定：
+        // 短息屏（< 阈值）续算剩余时间，长息屏清零重算并作废超时态。
         if (s.awaitingRest) {
             recordOverdue(context, s, t)
             TimerStore.save(context, f.copy(offAt = t, overdueCounting = false,
@@ -637,10 +690,21 @@ object EyeTimer {
             return
         }
 
-        // 等待用户确认休息（超时态）：保持提醒，并恢复超时累计与循环闹钟
+        // 等待用户确认休息（超时态）
         if (s.awaitingRest) {
             AlarmScheduler.cancelWorkAlarm(context)
-            if (screenOn) {
+            val leftLong = !screenOn && s.offAt > 0 && t - s.offAt >= LONG_OFF_RESET_MS
+            if (leftLong) {
+                // 息屏期间已达「真正离开」阈值：作废上一轮的到点欠账与超时态。
+                // 此时屏幕仍关着，只落盘清空状态，不排新的到点闹钟（亮屏时再起算）。
+                TimerStore.save(
+                    context,
+                    TimerState(reminderEnabled = true)
+                )
+                AlarmScheduler.cancelOverdueReminder(context)
+                RestNotifier.cancelReminder(context)
+                RestOverlayService.stop(context)
+            } else if (screenOn) {
                 val resumed = if (s.screenOnAt > 0) s else s.copy(screenOnAt = t)
                 recordOverdue(context, resumed, t)
                 TimerStore.save(context, resumed.copy(offAt = -1L, overdueCounting = true,
