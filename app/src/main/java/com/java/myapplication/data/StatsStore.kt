@@ -267,21 +267,44 @@ object StatsStore {
 
     // ==================== 读取接口 ====================
 
+    /**
+     * 只读视图：命中缓存时**不复制**整张表。
+     *
+     * 为什么需要它：[loadAll] 命中缓存也会 `toMutableMap()` 把最多 90 天的条目
+     * 整表复制一遍。对于「只读一个字段」的调用方（今日四个读数每秒都要取）
+     * 这份复制是纯浪费 —— 每秒 4 次、还有报告页的 3 次，合计每秒 7 次整表复制。
+     *
+     * 约定：本函数返回的 map **只读**，调用方不得修改。
+     * 需要写入的路径仍然走 [loadAll]（它保证拿到可安全修改的副本）。
+     */
+    private fun readAll(context: Context): Map<String, DailyStat> {
+        cache?.let { return it }
+        migrateIfNeeded(context)
+        cache?.let { return it }
+        // 缓存仍为空（例如首次读取且无数据）：把整表读进缓存后返回只读视图
+        loadAll(context)
+        return cache ?: emptyMap()
+    }
+
     /** 今日用眼总时长（秒） */
     fun todayWorkSeconds(context: Context): Int =
-        loadAll(context)[dayKeyOf(System.currentTimeMillis())]?.workSeconds ?: 0
+        readAllToday(context)?.workSeconds ?: 0
 
     /** 今日休息次数 */
     fun todayRestCount(context: Context): Int =
-        loadAll(context)[dayKeyOf(System.currentTimeMillis())]?.restCount ?: 0
+        readAllToday(context)?.restCount ?: 0
 
     /** 今日累计休息时长（秒） */
     fun todayRestSeconds(context: Context): Int =
-        loadAll(context)[dayKeyOf(System.currentTimeMillis())]?.restSeconds ?: 0
+        readAllToday(context)?.restSeconds ?: 0
 
     /** 今日最长连续用眼（秒） */
     fun todayLongestStreak(context: Context): Int =
-        loadAll(context)[dayKeyOf(System.currentTimeMillis())]?.longestStreakSeconds ?: 0
+        readAllToday(context)?.longestStreakSeconds ?: 0
+
+    /** 今日那一条（没有则 null）。走只读视图，不复制整表。 */
+    private fun readAllToday(context: Context): DailyStat? =
+        readAll(context)[dayKeyOf(System.currentTimeMillis())]
 
     /** 近 N 天序列（升序，缺失日自动补 0），用于日/周/月报告 */
     fun dailySeries(context: Context, days: Int): List<DailyStat> {

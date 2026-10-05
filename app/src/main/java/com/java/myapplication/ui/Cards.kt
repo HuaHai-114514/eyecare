@@ -1,7 +1,10 @@
 package com.java.myapplication.ui
 
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -10,21 +13,26 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -92,39 +100,19 @@ fun EyeCareSwitchCard(
     }
 }
 
-// 健康知识卡片
-@Composable
-fun TipCard(tip: EyeTip) {
-    SoftCard {
-        Text(
-            "💡 护眼小知识",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.primary,
-            fontWeight = FontWeight.Medium
-        )
-        Spacer(Modifier.height(10.dp))
-        Text(
-            "${tip.emoji} ${tip.title}",
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.onSurface
-        )
-        Spacer(Modifier.height(6.dp))
-        Text(
-            tip.content,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-    }
-}
-
 /**
  * 护眼知识轮播（v2.4.0）。
  *
  * 取代原先独立的「护眼知识」导航页：把整页题库搬进主页一张卡片，
  * 每 [autoIntervalMs] 自动切一条，用户手动划过之后暂停 [resumeDelayMs] 再恢复自动播放。
  *
- * 实现只用 Compose 自带动画/手势 API（AnimatedContent + detectHorizontalDragGestures），
+ * 实现只用 Compose 自带动画/手势 API（AnimatedContent + draggable），
  * 不引入 Pager 等新依赖，保持轻量。
+ *
+ * v2.4.4 交互打磨：
+ * - 拖拽**跟手**（拖动时内容随手平移，而不是松手才动），带一点阻尼手感；
+ * - 松手未过阈值会**弹回**原位，过了阈值才翻页；
+ * - 页码指示器用固定 16dp + `graphicsLayer.scaleX` 过渡（不动 width，避免布局动画）。
  */
 @Composable
 fun TipCarousel(
@@ -139,6 +127,21 @@ fun TipCarousel(
     var lastManualAt by remember { mutableLongStateOf(0L) }
     // 每次自动/手动切换都自增，用于重启下面的定时协程（作为 LaunchedEffect 的 key）
     var ticker by remember { mutableIntStateOf(0) }
+
+    // 跟手拖拽的位移（px）。拖动中只是普通状态写入（每个 pointer 事件不起协程），
+    // 抬手后才用 animate(spring) 归零。
+    var dragOffset by remember { mutableFloatStateOf(0f) }
+    // 本次翻页是否由手拖触发：手拖时拖拽本身已给了方向感，翻页只做淡入淡出；
+    // 自动播放没有拖拽兜底，才用横向滑入来交代「新的一屏从哪来」。
+    var userDriven by remember { mutableStateOf(false) }
+    // 一次拖拽开始时的页码，用来判断「拖完之后 index 有没有被自动播放改掉」
+    val dragStartIndex = remember { mutableIntStateOf(0) }
+
+    val density = LocalDensity.current
+    val dragBoundPx = with(density) { 96.dp.toPx() }
+    val distanceThresholdPx = with(density) { 48.dp.toPx() }
+    // 甩动判据（px/s）：轻扫就该生效，不必硬拖过位移阈值
+    val flingVelocityPx = with(density) { 300.dp.toPx() }
 
     // 自动播放：每 autoIntervalMs 推进一步；手动滑动后暂停 resumeDelayMs
     LaunchedEffect(ticker, tips.size) {
@@ -155,7 +158,9 @@ fun TipCarousel(
         }
     }
 
-    val tip = tips[index]
+    // 翻完之后复位：transitionSpec 只在 targetState 变化那一刻求值，
+    // 这里在组合完成后再清标记，不会影响已经开始的这次翻页。
+    LaunchedEffect(index) { userDriven = false }
 
     SoftCard {
         Row(
@@ -178,44 +183,68 @@ fun TipCarousel(
 
         Spacer(Modifier.height(10.dp))
 
-        // 手势区：左右拖拽切换（拖动超过阈值即翻页，并记录手动时间以暂停自动播放）
+        // 手势区：左右拖拽切换。拖动时内容跟手平移；松手后按「位移 or 甩动速度」判翻页，
+        // 不翻则用弹簧弹回原位（手势可被中途反向，弹簧能保留速度，固定时长会从零重启）。
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .pointerInput(tips.size) {
-                    var dragAcc = 0f
-                    detectHorizontalDragGestures(
-                        onDragEnd = {
-                            if (dragAcc <= -60f) {
-                                index = (index + 1) % tips.size
-                                lastManualAt = System.currentTimeMillis()
-                                ticker++
-                            } else if (dragAcc >= 60f) {
-                                index = (index - 1 + tips.size) % tips.size
-                                lastManualAt = System.currentTimeMillis()
-                                ticker++
+                // graphicsLayer 而非 offset：位移留在合成层（GPU），不触发每帧重新布局
+                .graphicsLayer { translationX = dragOffset }
+                .draggable(
+                    orientation = Orientation.Horizontal,
+                    state = rememberDraggableState { delta ->
+                        // 0.9 系数 + 限幅：拖到头有轻微阻尼感（越拖越沉），不是硬墙
+                        dragOffset = (dragOffset + delta * 0.9f).coerceIn(-dragBoundPx, dragBoundPx)
+                    },
+                    onDragStarted = { dragStartIndex.intValue = index },
+                    onDragStopped = { velocity ->
+                        val flipForward = dragOffset <= -distanceThresholdPx || velocity <= -flingVelocityPx
+                        val flipBackward = dragOffset >= distanceThresholdPx || velocity >= flingVelocityPx
+                        if ((flipForward || flipBackward) && dragStartIndex.intValue == index) {
+                            // 标记「本次翻页是手拖出来的」：拖拽本身已经提供了方向感，
+                            // 翻页就只做淡入淡出 + 弹回原位，不再叠加一次横向滑入
+                            // —— 那是两条同轴位移同时播放，视觉上会「抖一下」。
+                            userDriven = true
+                            index = if (flipForward) {
+                                (index + 1) % tips.size
+                            } else {
+                                (index - 1 + tips.size) % tips.size
                             }
-                            dragAcc = 0f
-                        },
-                        onHorizontalDrag = { _, delta -> dragAcc += delta }
-                    )
-                }
+                            lastManualAt = System.currentTimeMillis()
+                            ticker++
+                        }
+                        animate(
+                            initialValue = dragOffset,
+                            targetValue = 0f,
+                            animationSpec = spring(
+                                dampingRatio = 0.82f,
+                                stiffness = Spring.StiffnessMediumLow
+                            )
+                        ) { value, _ -> dragOffset = value }
+                    }
+                )
         ) {
             AnimatedContent(
                 targetState = index,
                 transitionSpec = {
-                    val forward = targetState > initialState
-                    val enter = slideInHorizontally(
-                        animationSpec = tween(320)
-                    ) { w -> if (forward) w / 3 else -w / 3 } + fadeIn(tween(320))
-                    val exit = slideOutHorizontally(
-                        animationSpec = tween(320)
-                    ) { w -> if (forward) -w / 3 else w / 3 } + fadeOut(tween(320))
-                    enter togetherWith exit
+                    if (userDriven) {
+                        // 手拖翻页：不叠横向滑入（会和回弹 spring 抢同一根轴，看起来抖）
+                        fadeIn(tween(MotionDurations.SMALL_MS, easing = EaseOutStrong)) togetherWith
+                            fadeOut(tween(MotionDurations.EXIT_MS))
+                    } else {
+                        val forward = targetState > initialState
+                        val enter = slideInHorizontally(
+                            animationSpec = tween(MotionDurations.ENTER_MS, easing = EaseOutStrong)
+                        ) { w -> if (forward) w / 3 else -w / 3 } + fadeIn(tween(MotionDurations.ENTER_MS, easing = EaseOutStrong))
+                        val exit = slideOutHorizontally(
+                            animationSpec = tween(MotionDurations.ENTER_MS, easing = EaseOutStrong)
+                        ) { w -> if (forward) -w / 3 else w / 3 } + fadeOut(tween(MotionDurations.EXIT_MS))
+                        enter togetherWith exit
+                    }
                 },
                 label = "tip-carousel"
             ) { i ->
-                val t = tips[i]
+                val t = tips[i % tips.size]
                 Column(modifier = Modifier.fillMaxWidth()) {
                     Text(
                         "${t.emoji} ${t.title}",
@@ -234,50 +263,33 @@ fun TipCarousel(
 
         Spacer(Modifier.height(12.dp))
 
-        // 页码指示器
+        // 页码指示器（宽度平滑过渡，不再跳变）
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.Center
         ) {
             repeat(tips.size) { i ->
+                val active = i == index
+                val dotScale by animateFloatAsState(
+                    targetValue = if (active) 1f else 0.375f,
+                    animationSpec = tween(MotionDurations.ENTER_MS, easing = EaseOutStrong),
+                    label = "dotScale"
+                )
                 Box(
                     modifier = Modifier
                         .padding(horizontal = 3.dp)
                         .height(6.dp)
-                        .width(if (i == index) 16.dp else 6.dp)
+                        .width(16.dp)
+                        // 固定 16dp + scaleX(0.375→1)，视觉上仍是 6dp→16dp。
+                        // 用 transform 而不是动 width：动 width 走布局阶段（每帧 relayout + repaint）。
+                        .graphicsLayer { scaleX = dotScale }
                         .clip(RoundedCornerShape(3.dp))
                         .background(
-                            if (i == index) MaterialTheme.colorScheme.primary
+                            if (active) MaterialTheme.colorScheme.primary
                             else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.15f)
                         )
                 )
             }
-        }
-    }
-}
-
-// 今日小结卡片
-@Composable
-fun TodaySummaryCard(count: Int, seconds: Int) {
-    SoftCard {
-        Text(
-            "📋 今日小结",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.primary,
-            fontWeight = FontWeight.Medium
-        )
-        Spacer(Modifier.height(12.dp))
-        Row(modifier = Modifier.fillMaxWidth()) {
-            StatItem(
-                value = "$count",
-                label = "休息次数",
-                modifier = Modifier.weight(1f)
-            )
-            StatItem(
-                value = "${seconds / 60}",
-                label = "累计休息(分)",
-                modifier = Modifier.weight(1f)
-            )
         }
     }
 }

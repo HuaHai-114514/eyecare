@@ -4,14 +4,14 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
-import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
@@ -20,7 +20,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -35,6 +37,7 @@ import com.java.myapplication.ui.components.DailyBarChart
 import com.java.myapplication.ui.components.EyeIcons
 import com.java.myapplication.ui.components.EyeProgressRing
 import com.java.myapplication.ui.theme.*
+import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 private enum class Tab { TIMER, REPORT, SETTINGS }
@@ -45,6 +48,7 @@ private enum class ReportRange(val days: Int, val label: String) {
     WEEK(7, "周"),
     MONTH(30, "月")
 }
+
 
 @Composable
 fun EyeCareApp(viewModel: EyeCareViewModel = viewModel()) {
@@ -70,6 +74,9 @@ fun EyeCareApp(viewModel: EyeCareViewModel = viewModel()) {
 
     var currentTab by remember { mutableStateOf(Tab.TIMER) }
 
+    // 设置页保存反馈（改一下就存一下，给一条轻量 Snackbar 让人放心）
+    val snackbarHostState = remember { SnackbarHostState() }
+
     // 首次启动引导：只在没看过时弹一次（走完或跳过都会写入完成标记）
     var showOnboarding by remember { mutableStateOf(!OnboardingStore.isDone(context)) }
 
@@ -79,44 +86,91 @@ fun EyeCareApp(viewModel: EyeCareViewModel = viewModel()) {
         return
     }
 
+    // 页面切换：用 HorizontalPager 而不是 AnimatedContent。
+    //
+    // 之前用 AnimatedContent + 位移会掉帧，但病因不是「位移」——
+    // 是 AnimatedContent 在切换时把新旧两页同时挂上，两页各自跑完整的
+    // measure / layout / draw；位移只是让这件事每帧都可见（连静止的旧页也要重排）。
+    // 所以上一版改成纯 alpha 是「把症状和病因一起删了」：不卡了，但也没动效了。
+    //
+    // Pager 的机制不一样：它是一块横贯三页的连续画布，每帧只做一次布局，
+    // 三页的位移全部走各自的 graphicsLayer.translationX（合成层），
+    // 不触发 measure / layout / draw —— 这就是「只动 transform」的落地方式。
+    // 附带拿到 Apple 说的那几件事：跟手 1:1、可打断、松手时速度交接、边界阻尼。
+    val pagerState = rememberPagerState(
+        initialPage = currentTab.ordinal,
+        pageCount = { Tab.entries.size }
+    )
+
+    // 底部导航点击 → 弹簧滚到目标页。dampingRatio 1.0（临界阻尼）是 Apple 的默认值：
+    // 不弹跳、干净落位；这是「系统发起」的动作，没有动量需要延续，
+    // 所以不该有回弹 —— 回弹只留给用户甩出来的手势。
+    val scope = rememberCoroutineScope()
+    val goTo: (Tab) -> Unit = { tab ->
+        if (pagerState.currentPage != tab.ordinal) {
+            scope.launch {
+                pagerState.animateScrollToPage(tab.ordinal, animationSpec = SettleSpring)
+            }
+        }
+    }
+
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
             NavigationBar(
                 containerColor = MaterialTheme.colorScheme.surface
             ) {
                 NavigationBarItem(
                     selected = currentTab == Tab.TIMER,
-                    onClick = { currentTab = Tab.TIMER },
+                    onClick = { goTo(Tab.TIMER) },
                     icon = { Icon(EyeIcons.Timer, contentDescription = "护眼计时") },
                     label = { Text("护眼计时") }
                 )
                 NavigationBarItem(
                     selected = currentTab == Tab.REPORT,
-                    onClick = { currentTab = Tab.REPORT },
+                    onClick = { goTo(Tab.REPORT) },
                     icon = { Icon(EyeIcons.Report, contentDescription = "数据报告") },
                     label = { Text("数据报告") }
                 )
                 NavigationBarItem(
                     selected = currentTab == Tab.SETTINGS,
-                    onClick = { currentTab = Tab.SETTINGS },
+                    onClick = { goTo(Tab.SETTINGS) },
                     icon = { Icon(EyeIcons.Settings, contentDescription = "护眼设置") },
                     label = { Text("护眼设置") }
                 )
             }
         }
     ) { innerPadding ->
+        // 手势滑动时把当前页同步回导航栏，药丸 indicator 才会跟着手指走
+        LaunchedEffect(pagerState) {
+            snapshotFlow { pagerState.settledPage }.collect { settled ->
+                currentTab = Tab.entries[settled]
+            }
+        }
+
         Box(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
-            // 页面切换淡入淡出，避免生硬跳切
-            AnimatedContent(
-                targetState = currentTab,
-                transitionSpec = { fadeIn(tween(220)) togetherWith fadeOut(tween(160)) },
-                label = "tab-switch"
-            ) { tab ->
-                when (tab) {
-                    Tab.TIMER -> TimerTab(viewModel, context, onOpenSettings = { currentTab = Tab.SETTINGS })
+            HorizontalPager(
+                state = pagerState,
+                // 两侧各预组合 2 页（总共只有 3 页，等于全部页面在首帧后就都在场）。
+                //
+                // 为什么是 2 而不是 1：这个参数决定「当前页两侧各有多少页会被提前测量」，
+                // 而**首次测量一个页面 = 首次组合它整棵子树**。取 1 时，冷启动停在计时页，
+                // 报告页会在启动时被组合，但**设置页（距离 2）不会** ——
+                // 于是第一次切到设置页的那几帧要现做「组合 750 行 + 首次 measure + 首次 draw」，
+                // 全砸在弹簧动画里，就是「第一次切明显掉帧、以后正常」。
+                // 取 2 把这份一次性开销提前到启动首帧之后、用户还没点之前。
+                //
+                // 代价：三页常驻内存（都是轻量 Compose 树，无大图），
+                // 换来「每次切换都一样顺」——这个交换对只有 3 页的底部导航是划算的。
+                beyondViewportPageCount = 2,
+                modifier = Modifier.fillMaxSize(),
+                key = { it }
+            ) { page ->
+                when (Tab.entries[page]) {
+                    Tab.TIMER -> TimerTab(viewModel, context)
                     Tab.REPORT -> ReportTab(viewModel, context)
-                    Tab.SETTINGS -> SettingsTab(viewModel, context)
+                    Tab.SETTINGS -> SettingsTab(viewModel, context, snackbarHostState)
                 }
             }
         }
@@ -124,6 +178,11 @@ fun EyeCareApp(viewModel: EyeCareViewModel = viewModel()) {
 
     // 到点提醒确认弹窗：点了「开始休息」才开始休息计时
     if (viewModel.phase == RestPhase.AWAITING) {
+        // 弹窗出现时轻振一下：手上拿着手机、音量静音时也能察觉
+        val haptic = LocalHapticFeedback.current
+        LaunchedEffect(Unit) {
+            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+        }
         AlertDialog(
             onDismissRequest = { viewModel.postponeRest(context) },
             title = { Text("\uD83C\uDF3F 该让眼睛休息啦") },
@@ -164,8 +223,7 @@ fun EyeCareApp(viewModel: EyeCareViewModel = viewModel()) {
 @Composable
 private fun TimerTab(
     viewModel: EyeCareViewModel,
-    context: Context,
-    onOpenSettings: () -> Unit
+    context: Context
 ) {
     Column(
         modifier = Modifier
@@ -174,40 +232,26 @@ private fun TimerTab(
             .padding(horizontal = 24.dp, vertical = 20.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // 顶部：标题 + 设置
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    "护眼时光",
-                    style = MaterialTheme.typography.headlineLarge,
-                    fontWeight = FontWeight.Medium,
-                    color = MaterialTheme.colorScheme.onBackground
-                )
-                Text(
-                    "给眼睛一片呼吸的原野",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            IconButton(onClick = onOpenSettings) {
-                Icon(
-                    EyeIcons.Settings,
-                    contentDescription = "打开设置",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        }
+        // 顶部标题（设置入口统一放在底部导航，避免同一功能两处入口）
+        Text(
+            "护眼时光",
+            style = MaterialTheme.typography.headlineLarge,
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.onBackground
+        )
+        Text(
+            "给眼睛一片呼吸的原野",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
 
         Spacer(Modifier.height(20.dp))
 
         // 免打扰进行中提示（有则淡入显示）
         AnimatedVisibility(
             visible = viewModel.inDndWindow,
-            enter = fadeIn(tween(300)),
-            exit = fadeOut(tween(200))
+            enter = fadeIn(tween(MotionDurations.ENTER_MS, easing = EaseOutStrong)),
+            exit = fadeOut(tween(MotionDurations.EXIT_MS))
         ) {
             Column {
                 SoftCard {
@@ -304,14 +348,20 @@ private fun TimerTab(
 private fun ReportTab(viewModel: EyeCareViewModel, context: Context) {
     var range by remember { mutableStateOf(ReportRange.WEEK) }
 
-    // 每次进入/切换档位时刷新
-    // 注意：这里不再把 viewModel.todayWorkSeconds 当缓存键 —— 它每秒都在变，
-    // 会让 remember 每秒重算 30/60 天数据。今日数据本身由「今日小结」卡片单独展示。
-    var refreshKey by remember { mutableStateOf(0) }
-    val stats = remember(range, refreshKey) {
+    // 缓存键：今日累计是「统计有没有变」的可观测信号 —— 每记一笔今日数据就变。
+    // 换用 Pager 之后这一页不再被销毁重建（±1 页常驻），所以必须有这么个键
+    // 才知道该重新读一次；否则回到报告页永远看到进页面那一眼的旧快照。
+    //
+    // 按**分钟**取整而不是直接用秒：这一页所有读数都是以分钟展示的
+    // （`s.workSeconds / 60`），秒级变化在这一页上根本看不出来，
+    // 却会让 remember 每秒作废一次 —— 而每次作废要重跑
+    // dailySeries + achievementRate + workTrendPercent 三遍整表计算。
+    // 取整到分钟后，同一分钟内数字完全一致，计算量直接降到 1/60。
+    val statsKey = (viewModel.todayWorkSeconds / 60) to viewModel.todayCount
+    val goalMinutes = viewModel.settings.dailyGoalMinutes
+    val stats = remember(range, statsKey) {
         StatsStore.dailySeries(context, range.days)
     }
-    LaunchedEffect(Unit) { refreshKey++ }
 
     // 横轴标签：用短格式「M/d」（如 9/1），比 MM-dd 更省宽度；
     // 30 天档位下 30 个标签会挤成一片、数字被压坏（图 1 的乱码就是这么来的），
@@ -320,11 +370,14 @@ private fun ReportTab(viewModel: EyeCareViewModel, context: Context) {
     val workData = remember(stats) { stats.mapIndexed { i, s -> labels[i] to (s.workSeconds / 60) } }
     val restData = remember(stats) { stats.mapIndexed { i, s -> labels[i] to s.restCount } }
 
-    val totalWork = stats.sumOf { it.workSeconds }
-    val totalRest = stats.sumOf { it.restCount }
-    val longest = stats.maxOfOrNull { it.longestStreakSeconds } ?: 0
-    val rate = StatsStore.achievementRate(context, range.days, viewModel.settings.dailyGoalMinutes)
-    val trend = StatsStore.workTrendPercent(context, range.days)
+    // 汇总数字跟 stats 同生命周期：跟它一起 remember，避免每秒跟着重组重算。
+    val totalWork = remember(stats) { stats.sumOf { it.workSeconds } }
+    val totalRest = remember(stats) { stats.sumOf { it.restCount } }
+    val longest = remember(stats) { stats.maxOfOrNull { it.longestStreakSeconds } ?: 0 }
+    val rate = remember(range, goalMinutes, statsKey) {
+        StatsStore.achievementRate(context, range.days, goalMinutes)
+    }
+    val trend = remember(range, statsKey) { StatsStore.workTrendPercent(context, range.days) }
 
     Column(
         modifier = Modifier
@@ -351,10 +404,7 @@ private fun ReportTab(viewModel: EyeCareViewModel, context: Context) {
             ReportRange.entries.forEach { r ->
                 FilterChip(
                     selected = range == r,
-                    onClick = {
-                        range = r
-                        refreshKey++
-                    },
+                    onClick = { range = r },
                     label = { Text(r.label) }
                 )
             }

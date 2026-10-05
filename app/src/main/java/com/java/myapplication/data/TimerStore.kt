@@ -35,7 +35,14 @@ data class TimerState(
      * 用于结算统计时把**跨越 0 点**的时长按天切分到各自日期。
      * -1 表示未知（退化为全部记到结算当天，兼容旧数据）。
      */
-    val accumStartWallMs: Long = -1L
+    val accumStartWallMs: Long = -1L,
+
+    // ============ v2.4.4：统计去重（修复用眼时长翻倍） ============
+    /**
+     *
+     * `workAccumMs - recordedAccumMs` 的增量，记完立刻把本字段抬到 `workAccumMs`。
+     */
+    val recordedAccumMs: Long = 0L
 )
 
 object TimerStore {
@@ -53,6 +60,8 @@ object TimerStore {
     private const val KEY_OVERDUE_RECORDED_MS = "overdue_recorded_ms"
     // v2.4.x
     private const val KEY_ACCUM_START_WALL_MS = "accum_start_wall_ms"
+    // v2.4.4
+    private const val KEY_RECORDED_ACCUM_MS = "recorded_accum_ms"
 
     private fun prefs(context: Context): SharedPreferences =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -70,7 +79,8 @@ object TimerStore {
             tipIndex = p.getInt(KEY_TIP_INDEX, -1),
             overdueCounting = p.getBoolean(KEY_OVERDUE_COUNTING, false),
             overdueRecordedMs = p.getLong(KEY_OVERDUE_RECORDED_MS, 0L),
-            accumStartWallMs = p.getLong(KEY_ACCUM_START_WALL_MS, -1L)
+            accumStartWallMs = p.getLong(KEY_ACCUM_START_WALL_MS, -1L),
+            recordedAccumMs = p.getLong(KEY_RECORDED_ACCUM_MS, 0L)
         )
     }
 
@@ -87,6 +97,7 @@ object TimerStore {
             .putBoolean(KEY_OVERDUE_COUNTING, state.overdueCounting)
             .putLong(KEY_OVERDUE_RECORDED_MS, state.overdueRecordedMs)
             .putLong(KEY_ACCUM_START_WALL_MS, state.accumStartWallMs)
+            .putLong(KEY_RECORDED_ACCUM_MS, state.recordedAccumMs)
             .apply()
     }
 }

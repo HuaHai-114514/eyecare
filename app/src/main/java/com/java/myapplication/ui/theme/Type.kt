@@ -16,6 +16,14 @@ val Typography = Typography(
         lineHeight = 36.sp,
         letterSpacing = 0.sp
     ),
+    // 中标题 20sp：弹窗标题（引导页 / 免责声明）用，填补 24sp 与 18sp 之间的断层
+    headlineSmall = TextStyle(
+        fontFamily = FontFamily.Default,
+        fontWeight = FontWeight.Medium,
+        fontSize = 20.sp,
+        lineHeight = 28.sp,
+        letterSpacing = 0.sp
+    ),
     // 标题 18sp
     titleLarge = TextStyle(
         fontFamily = FontFamily.Default,

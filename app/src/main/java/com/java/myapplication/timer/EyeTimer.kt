@@ -135,7 +135,11 @@ object EyeTimer {
         val fullSpan = (at - segStart).coerceAtLeast(1L)
         val beforeSpan = (todayStart - segStart).coerceIn(0L, fullSpan)
         val beforeMs = (curAccum.toDouble() * (beforeSpan.toDouble() / fullSpan.toDouble())).toLong()
-        val beforeSec = (beforeMs / 1000L).toInt()
+        // 已结算部分按同一比例切分，跨天时只补「尚未计入统计」的差额，
+        // 否则整段会被重复记一次（旧实现的翻倍根因之一）。
+        val alreadyRatio = s.recordedAccumMs.toDouble().coerceIn(0.0, curAccum.toDouble()) *
+            (beforeSpan.toDouble() / fullSpan.toDouble())
+        val beforeSec = ((beforeMs - alreadyRatio.toLong()).coerceAtLeast(0L) / 1000L).toInt()
         if (beforeSec >= MIN_RECORD_SECONDS) {
             // 归属起点日：整段（0 点前的这一截）记到昨天
             StatsStore.addWorkSession(context, beforeSec, startWallMs = segStart)
@@ -146,20 +150,31 @@ object EyeTimer {
         // - screenOnAt 若之前 >0（正在累计）则保持「正在累计」：设为 at
         // - 段起点重置为「今天 0 点」
         val afterMs = (curAccum - beforeMs).coerceAtLeast(0L)
+        // 新一段（0 点之后）尚未结算，recordedAccumMs 与 workAccumMs 同步归零。
         return s.copy(
             workAccumMs = afterMs,
             screenOnAt = if (s.screenOnAt > 0) at else -1L,
-            accumStartWallMs = todayStart
+            accumStartWallMs = todayStart,
+            recordedAccumMs = 0L
         )
     }
 
-    private fun recordWorkSession(context: Context, state: TimerState) {
-        val seconds = (state.workAccumMs / 1000L).toInt()
-        // 过滤掉抖动产生的一两秒噪声
-        if (seconds < MIN_RECORD_SECONDS) return
+    private fun recordWorkSession(context: Context, state: TimerState): TimerState {
+        val accum = state.workAccumMs
+        // 基准高于当前累计 ⇒ 累计被重置过（已开启新一段），视为本段尚未结算；
+        // 否则新一段会被旧基准「压住」而永远记不进统计（自愈兜底）。
+        val already = if (state.recordedAccumMs > accum) 0L
+        else state.recordedAccumMs.coerceAtLeast(0L)
+        val deltaSec = ((accum - already) / 1000L).toInt()
+        if (deltaSec < MIN_RECORD_SECONDS) {
+            // 增量不足 5 秒：不写统计，但把基准抬到当前累计值，
+            // 避免这些零头在后续出口被反复凑成一段重复计入。
+            return state.copy(recordedAccumMs = accum)
+        }
         // v2.4.x：带本段累计的墙钟起点，让跨 0 点的时长能按天切分到各自日期。
         // 起点未知(-1)时传入 -1，StatsStore 会退化为「全部记到当天」（兼容旧数据）。
-        StatsStore.addWorkSession(context, seconds, startWallMs = state.accumStartWallMs)
+        StatsStore.addWorkSession(context, deltaSec, startWallMs = state.accumStartWallMs)
+        return state.copy(recordedAccumMs = accum)
     }
 
     /**
@@ -169,15 +184,19 @@ object EyeTimer {
      * 写入统计，并用 [TimerState.overdueRecordedMs] 记录已结算的毫秒数去重，
      * 避免每次 tick / 重复提醒把同一段时长反复计入。
      */
-    private fun recordOverdue(context: Context, s: TimerState, at: Long) {
-        if (!s.overdueCounting) return
+    private fun recordOverdue(context: Context, s: TimerState, at: Long): Long {
+        if (!s.overdueCounting) return s.recordedAccumMs
         val curAccum = accumulatedAt(s, at)
         val deltaSec = overdueDeltaSeconds(curAccum, workMs(context), s.overdueRecordedMs)
-        if (deltaSec < MIN_RECORD_SECONDS) return
+        if (deltaSec < MIN_RECORD_SECONDS) return s.recordedAccumMs
         // 超时段的墙钟起点：上回到点时刻（screenOnAt，到点时被重置为到点时刻），
         // 若未知则用本段累计起点兜底。
         val overdueStart = if (s.screenOnAt > 0) s.screenOnAt else s.accumStartWallMs
         StatsStore.addWorkSession(context, deltaSec, startWallMs = overdueStart)
+        // v2.4.4：超时段已入账，把「已结算基准」抬到当前累计值。
+        // 否则它会在后续出口（休息结束 / 稍后再说 / 息屏）被 recordWorkSession
+        // 以 `workAccumMs - recordedAccumMs` 再记一遍 —— 这是时长翻倍的根因之一。
+        return curAccum
     }
 
     /** 把「已落盘累计 + 本次亮屏已过去时长」算成当前总累计毫秒（纯函数，便于测试） */
@@ -271,7 +290,7 @@ object EyeTimer {
         if (leftLong || s.workAccumMs <= 0L) {
             // 真正离开过：从 0 起算（新段起点 = 本次亮屏时刻）
             TimerStore.save(context, s.copy(workAccumMs = 0L, screenOnAt = t, offAt = -1L,
-                accumStartWallMs = t))
+                accumStartWallMs = t, recordedAccumMs = 0L))
             AlarmScheduler.scheduleWorkDeadline(context, t + workMs)
         } else {
             // 短暂息屏：续算剩余时间
@@ -322,11 +341,14 @@ object EyeTimer {
 
         val t = now()
         val f = frozen(s, t)
-        TimerStore.save(context, f.copy(offAt = t))
         AlarmScheduler.cancelWorkAlarm(context)
-        // 息屏时若已累计出可观用眼时长，视为本次用眼周期结束，结算入统计
+        // 息屏时若已累计出可观用眼时长，视为本次用眼周期结束，结算入统计。
+        // v2.4.4：recordWorkSession 现在会落盘（含 offAt），故改为互斥分支，
+        // 避免先前写入的 offAt 被随后落盘的旧 offAt 覆盖（会让「息屏时长」判定失真）。
         if (!s.phaseResting && !s.awaitingRest) {
-            recordWorkSession(context, f)
+            recordWorkSession(context, f.copy(offAt = t))
+        } else {
+            TimerStore.save(context, f.copy(offAt = t))
         }
 
         // 休息进行中：锁屏不打断，保留结束闹钟
@@ -339,9 +361,10 @@ object EyeTimer {
         // 也不再重复提醒）；是否作废该状态交由亮屏时按息屏时长判定：
         // 短息屏（< 阈值）续算剩余时间，长息屏清零重算并作废超时态。
         if (s.awaitingRest) {
-            recordOverdue(context, s, t)
+            val mark = recordOverdue(context, s, t)
             TimerStore.save(context, f.copy(offAt = t, overdueCounting = false,
-                overdueRecordedMs = overdueRecordedAfter(context, s, t)))
+                overdueRecordedMs = overdueRecordedAfter(context, s, t),
+                recordedAccumMs = mark))
             AlarmScheduler.cancelOverdueReminder(context)
             return
         }
@@ -391,20 +414,23 @@ object EyeTimer {
         // 到点：进入「等待休息 + 超时累计」态。
         // v2.4.0 起不再把累计冻结在 workMs，而是保留 screenOnAt 继续走动，
         // 这样用户不休息期间的时间会照常累计并计入统计（修复统计漏算）。
-        val deadlineState = s.copy(
+        // 到点这一轮先把「到点前的 workMs」结算入统计（带本段真实起点，
+        // 跨天时能正确归属到昨天），再把段起点重置为 t 起算超时段。
+        // v2.4.4：recordWorkSession 会把 recordedAccumMs 抬到 workMs，
+        // 因此这一步必须**先于**下面 deadlineState 的落盘，避免被覆盖。
+        val settled = recordWorkSession(context, s.copy(workAccumMs = workMs))
+        val deadlineState = settled.copy(
             workAccumMs = workMs,
             screenOnAt = t,
             offAt = -1L,
             awaitingRest = true,
             overdueCounting = true,
             overdueRecordedMs = 0L,
-            // 到点前的那段在下一行被 recordWorkSession 结算；
-            // 之后累计的「超时段」从 t 起算，故段起点重置为 t。
+            // 到点前的那段已在上一步结算；之后累计的「超时段」从 t 起算，
+            // 故段起点重置为 t，且已记基准抬到 workMs（超时段从 0 开始计）。
             accumStartWallMs = t
         )
         TimerStore.save(context, deadlineState)
-        // 到点这一轮先结算到点前的 workMs
-        recordWorkSession(context, TimerState(workAccumMs = workMs))
         AlarmScheduler.cancelWorkAlarm(context)
         // 排超时二次提醒（未休息则每 overdueMs 重复）
         AlarmScheduler.scheduleOverdueReminder(context, t + overdueMs(context))
@@ -554,6 +580,22 @@ object EyeTimer {
         endRestPhase(context, s)
     }
 
+    /**
+     * 延长本次休息：把休息起点往后挪 [extraSeconds] 秒，等价于给倒计时加时。
+     *
+     * 只在「正在休息」时生效；同时把到点闹钟重新排到新的结束时刻，
+     * 否则闹钟会按旧时间把休息页收掉。
+     */
+    fun extendRest(context: Context, extraSeconds: Int) {
+        if (extraSeconds <= 0) return
+        val t = now()
+        val s = rollOverIfDayChanged(context, TimerStore.load(context), t)
+        if (!s.phaseResting || s.restStart <= 0L) return
+        val newStart = s.restStart + extraSeconds * 1000L
+        TimerStore.save(context, s.copy(restStart = newStart))
+        AlarmScheduler.scheduleRestDeadline(context, newStart + restMs(context))
+    }
+
     /** 忽略提醒 / 稍后再说：清掉提醒状态，重新起算一个用眼周期 */
     fun postponeRest(context: Context) {
         val s0 = TimerStore.load(context)
@@ -572,6 +614,7 @@ object EyeTimer {
                 overdueCounting = false,
                 overdueRecordedMs = 0L,
                 workAccumMs = 0L,
+                recordedAccumMs = 0L,
                 screenOnAt = if (screenOn) t else -1L,
                 offAt = if (screenOn) -1L else t,
                 accumStartWallMs = if (screenOn) t else -1L
@@ -605,6 +648,7 @@ object EyeTimer {
                 overdueCounting = false,
                 overdueRecordedMs = 0L,
                 workAccumMs = 0L,
+                recordedAccumMs = 0L,
                 screenOnAt = if (screenOn) t else -1L,
                 offAt = if (screenOn) -1L else t,
                 accumStartWallMs = if (screenOn) t else -1L

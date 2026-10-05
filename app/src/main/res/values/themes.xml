@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <style name="Theme.MyApplication" parent="android:Theme.Material.Light.NoActionBar" />
+    <!-- 系统主题只负责窗口背景：真正的界面配色由 Compose 的 MyApplicationTheme 决定。
+         这里显式指定 windowBackground，避免 Compose 首帧绘制前露出系统默认底色
+         （深色模式下会闪一下白屏）。深色变体见 values-night/themes.xml。 -->
+    <style name="Theme.MyApplication" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/window_background</item>
+    </style>
 </resources>

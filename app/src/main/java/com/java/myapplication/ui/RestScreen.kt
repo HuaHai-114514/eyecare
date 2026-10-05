@@ -1,6 +1,8 @@
 package com.java.myapplication.ui
 
 import android.content.Context
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
@@ -10,11 +12,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -55,20 +60,34 @@ fun RestScreen(viewModel: EyeCareViewModel, context: Context) {
     val restProgress = if (viewModel.settings.restSeconds <= 0) 1f
     else 1f - viewModel.restRemaining.toFloat() / viewModel.settings.restSeconds
 
+    // 进入休息页时淡入 + 极轻微放大，替掉原来从计时页「啪」地硬切。
+    // 只动 alpha/scale（GPU 合成，不触发布局）；时长取模态档下限，整页动画不走「慢」的那一档。
+    val enter = remember { Animatable(0f) }
+    LaunchedEffect(Unit) {
+        enter.animateTo(1f, tween(durationMillis = MotionDurations.MODAL_MS, easing = EaseOutStrong))
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .graphicsLayer {
+                alpha = enter.value
+                val s = 0.96f + 0.04f * enter.value
+                scaleX = s
+                scaleY = s
+            }
             .background(
                 Brush.verticalGradient(listOf(bgTop, bgMid, bgBottom))
             )
     ) {
+        // 注意：滚动容器里 `verticalArrangement = Center` 是不生效的（内容高度不受约束），
+        // 所以这里用「外层 Box 居中 + 内层 Column 可滚动」，内容不满一屏时才是真正居中。
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(
             modifier = Modifier
-                .fillMaxSize()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 32.dp, vertical = 40.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text("🌄", fontSize = 56.sp)
             Spacer(Modifier.height(20.dp))
@@ -98,6 +117,9 @@ fun RestScreen(viewModel: EyeCareViewModel, context: Context) {
                     trackColor = ringTrack
                 )
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    // 秒数不做动画：它每秒变一次，高频（一次休息 20–300 次），
+                    // 按频率表属于「100+/天 → 永不动画」；不停滚动的数字本身就是要读的信息，
+                    // 再叠 fade+scale 只会每秒重建一次 composition、并让数字看着"抖"。
                     Text(
                         text = "${viewModel.restRemaining}",
                         fontSize = 60.sp,
@@ -148,21 +170,44 @@ fun RestScreen(viewModel: EyeCareViewModel, context: Context) {
 
             Spacer(Modifier.height(32.dp))
 
-            // 提前结束按钮
-            OutlinedButton(
-                onClick = { viewModel.skipRest(context) },
-                shape = CircleShape,
-                border = androidx.compose.foundation.BorderStroke(1.5.dp, buttonBorder),
-                modifier = Modifier.height(48.dp)
+            // 操作区：想多歇一会儿就点「再休息 30 秒」，休息够了直接继续
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    "我已休息好，继续工作",
-                    color = accentColor,
-                    fontWeight = FontWeight.Medium
-                )
+                OutlinedButton(
+                    onClick = { viewModel.extendRest(context, 30) },
+                    shape = CircleShape,
+                    border = androidx.compose.foundation.BorderStroke(1.5.dp, buttonBorder),
+                    modifier = Modifier.height(48.dp)
+                ) {
+                    Text(
+                        "再休息 30 秒",
+                        color = accentColor,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+
+                Spacer(Modifier.width(12.dp))
+
+                // 提前结束按钮
+                OutlinedButton(
+                    onClick = { viewModel.skipRest(context) },
+                    shape = CircleShape,
+                    border = androidx.compose.foundation.BorderStroke(1.5.dp, buttonBorder),
+                    modifier = Modifier.height(48.dp)
+                ) {
+                    Text(
+                        "我已休息好",
+                        color = accentColor,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
             }
 
             Spacer(Modifier.height(12.dp))
+        }
         }
     }
 }

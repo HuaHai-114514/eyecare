@@ -10,7 +10,7 @@
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.3-7F52FF?logo=kotlin&logoColor=white)](https://kotlinlang.org)
 [![Compose](https://img.shields.io/badge/Jetpack%20Compose-Material%203-4285F4?logo=jetpackcompose&logoColor=white)](https://developer.android.com/jetpack/compose)
 [![API](https://img.shields.io/badge/API-24%20~%2035-00C853)](#)
-[![Version](https://img.shields.io/badge/version-v2.4.3-2E7D32)](releases/v2.4.3.md)
+[![Version](https://img.shields.io/badge/version-v2.6.11-2E7D32)](releases/v2.6.11.md)
 [![隐私](https://img.shields.io/badge/%E9%9A%90%E7%A7%81-%E9%9B%B6%E8%81%94%E7%BD%91-brightgreen)](#-设计边界)
 
 </div>
@@ -125,6 +125,7 @@ export PATH="$JAVA_HOME/bin:$PATH"
 
 | 版本 | versionCode | APK MD5 |
 |---|---:|---|
+| v2.6.11 | 34 | `1a019c962f046fc9c01ac24abb54db95` |
 | v2.4.3 | 33 | `8c9b1226b32e47826e4958e96d2e5596` |
 | v2.4.2 | 32 | `9b70603091d9272f1e1df716a0b9ad17` |
 | v2.4.0 | 30 | `c937b2ec574a61d486440f15e1166780` |
@@ -150,7 +151,8 @@ export PATH="$JAVA_HOME/bin:$PATH"
 
 | 版本 | 说明 |
 |---|---|
-| **v2.4.3** | 修复**息屏后再亮屏误弹超时提醒**：息屏 ≥1 分钟即结算并清零用眼计时，亮屏从 0 安静起算；超时提醒只在亮屏持续未休息时才弹 |
+| **v2.6.11** | 修复**页面切换掉帧卡顿**（尤其冷启动后第一次切换）：改用 `HorizontalPager` + 临界阻尼弹簧，位移走 `graphicsLayer` 合成层不触发重排；补 baseline profile；并按动效规范复审全项目 11 处交互 |
+| v2.4.3 | 修复**息屏后再亮屏误弹超时提醒**：息屏 ≥1 分钟即结算并清零用眼计时，亮屏从 0 安静起算；超时提醒只在亮屏持续未休息时才弹 |
 | v2.4.2 | 修复 Android 15/16 上**到点自动全屏失效**（改悬浮窗 + 前台服务）；修复报告页 30 天档横轴乱码；开关加二次确认；后台全屏休息页补上**圆环进度条** |
 | v2.4.1 | 报告页 30 天档横轴乱码的**过渡修复版**（versionCode 31，未单独归档 tag） |
 | v2.4.0 | 新增**超时二次提醒**（超时继续计入统计，每 N 分钟重复提醒）；科普页改**主页卡片轮播**；补过渡动效 |

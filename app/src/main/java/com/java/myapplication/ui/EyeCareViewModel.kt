@@ -13,6 +13,7 @@ import com.java.myapplication.data.AppSettings
 import com.java.myapplication.data.EyeTips
 import com.java.myapplication.data.SettingsStore
 import com.java.myapplication.data.StatsStore
+import com.java.myapplication.data.TimerState
 import com.java.myapplication.data.TimerStore
 import com.java.myapplication.timer.AlarmScheduler
 import com.java.myapplication.timer.EyeTimer
@@ -60,24 +61,11 @@ class EyeCareViewModel : ViewModel() {
     var reminderEnabled by mutableStateOf(true)
         private set
 
-    // 是否是「刚刚发生过一次自动结束的休息」——
-    // 用于界面在休息页停留一下再回到计时页，避免闪一下就走
-    var justFinishedRest by mutableStateOf(false)
-        private set
-
     // 今日用眼总时长（秒）/ 最长连续用眼（秒）
     var todayWorkSeconds by mutableIntStateOf(0)
         private set
     var todayLongestStreak by mutableIntStateOf(0)
         private set
-
-    // 今日达标情况：今日用眼占比 0f..1f（relative 到 dailyGoalMinutes）
-    val todayGoalProgress: Float
-        get() {
-            val goal = settings.dailyGoalMinutes
-            if (goal <= 0) return 0f
-            return (todayWorkSeconds.toFloat() / (goal * 60f)).coerceIn(0f, 1f)
-        }
 
     private var tickerJob: Job? = null
 
@@ -138,7 +126,6 @@ class EyeCareViewModel : ViewModel() {
         EyeTimer.resync(context, notifyMissed = true)
         SitReminder.resync(context)
         syncFromStore(context)
-        justFinishedRest = false
         startTicking(context)
     }
 
@@ -150,24 +137,41 @@ class EyeCareViewModel : ViewModel() {
 
     // 每秒界面刷新 + 休息结束兜底自愈（避免卡在 0 秒休息页）
     fun clockTick(context: Context) {
+        // 一次 tick 只读一次盘：以前这里 load → save → load → SettingsStore.load，
+        // 下面 syncFromStore 还要再读一遍同样三个 store。SharedPreferences 读是内存缓存、
+        // save 是整份 apply，看着便宜，但每秒都做、且正好落在动画帧上就贵了。
+        val s0 = TimerStore.load(context)
+
         // 跨天归零：界面每秒 tick 是「0 点整」最直接的感知点，
         // 到点即把昨天那段结算掉，让「今日用眼」从 0 重新累计。
-        EyeTimer.rollOverIfDayChanged(context, TimerStore.load(context), System.currentTimeMillis())
-            .let { TimerStore.save(context, it) }
-        val s = TimerStore.load(context)
-        if (s.phaseResting && s.restStart > 0) {
-            val restSec = SettingsStore.load(context).restSeconds
-            if (System.currentTimeMillis() - s.restStart >= restSec * 1000L) {
+        // 只在真的跨天时落盘 —— 以前无条件 save，等于每秒写一次 pref。
+        val rolled = EyeTimer.rollOverIfDayChanged(context, s0, System.currentTimeMillis())
+        val state = if (rolled != s0) {
+            TimerStore.save(context, rolled)
+            rolled
+        } else {
+            s0
+        }
+
+        if (state.phaseResting && state.restStart > 0) {
+            val restSec = settings.restSeconds
+            if (System.currentTimeMillis() - state.restStart >= restSec * 1000L) {
                 EyeTimer.finishRest(context)
-                justFinishedRest = true
             }
         }
-        syncFromStore(context)
+        syncFromStore(context, state)
     }
 
     // 从持久化状态实时计算界面读数
     private fun syncFromStore(context: Context) {
-        val s = TimerStore.load(context)
+        syncFromStore(context, TimerStore.load(context))
+    }
+
+    /**
+     * 同上，但由调用方传入已经读好的计时状态 —— 每秒 tick 那条路径上
+     * 刚读过一次盘，没必要为了这个函数再读一遍。
+     */
+    private fun syncFromStore(context: Context, s: TimerState) {
         val appSettings = SettingsStore.load(context)
         val workSec = appSettings.workMinutes * 60
         val restSec = appSettings.restSeconds
@@ -219,7 +223,6 @@ class EyeCareViewModel : ViewModel() {
     // 用户点通知/应用内「开始休息」：此时才开始休息倒计时
     fun startRest(context: Context) {
         EyeTimer.beginRest(context)
-        justFinishedRest = false
         syncFromStore(context)
     }
 
@@ -229,10 +232,15 @@ class EyeCareViewModel : ViewModel() {
         syncFromStore(context)
     }
 
-    // 用户手动结束休息（「我已休息好，继续工作」）
+    // 用户手动结束休息（「我已休息好」）
     fun skipRest(context: Context) {
         EyeTimer.skipRest(context)
-        justFinishedRest = true
+        syncFromStore(context)
+    }
+
+    /** 休息中想多歇一会儿：给本次休息加时 [extraSeconds] 秒 */
+    fun extendRest(context: Context, extraSeconds: Int) {
+        EyeTimer.extendRest(context, extraSeconds)
         syncFromStore(context)
     }
 
@@ -240,16 +248,6 @@ class EyeCareViewModel : ViewModel() {
         EyeTimer.setReminderEnabled(context, enabled)
         SitReminder.resync(context)
         syncFromStore(context)
-    }
-
-    /** 久坐提醒周期到点（TimerReceiver 收到 ACTION_SIT_DONE） */
-    fun onSitDeadline(context: Context) {
-        SitReminder.onDeadline(context, silent = inDndWindow)
-    }
-
-    /** 手动结束休息（走 skipRest，已内含 justFinishedRest 标记） */
-    fun finishRestNow(context: Context) {
-        skipRest(context)
     }
 
     fun updateSettings(context: Context, newSettings: AppSettings) {

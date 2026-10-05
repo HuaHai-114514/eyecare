@@ -1,0 +1,57 @@
+# 手写基线配置文件（Baseline Profile）。
+#
+# 为什么需要它：没有 baseline profile 时，APK 首次执行任何方法都走解释器，
+# 只有等 JIT 热起来才有原生代码。用户报的「冷启动第一次切页面掉帧、以后正常」
+# 正是这个签名 —— 第一次切换要现解释执行 Pager 的测量、弹簧动画与整页组合。
+#
+# 这里只覆盖 App 自己的冷启动 + 首次切换热点；Compose / AndroidX 各自
+# 自带 baseline-prof.txt，构建时会自动合并，不在这里重复。
+#
+# 格式：HSPL<class>->(<method>)
+#   H = hot, S = startup, P = post-startup, L = loaded
+#
+# 说明：这是**手写** profile，不是设备采样生成的。它只把已知的启动与
+# 首次切换链路标记为 AOT 编译，效果弱于真机采样，但不会影响正确性
+# （profile 只影响编译策略，不影响行为）。
+
+# ============ 进程启动 ============
+HSPLcom/java/myapplication/MainActivity;-><init>()V
+HSPLcom/java/myapplication/MainActivity;->onCreate(Landroid/os/Bundle;)V
+HSPLcom/java/myapplication/MainActivity;->onResume()V
+HSPLcom/java/myapplication/MainActivity;->onPause()V
+
+# ============ 主界面 / 底部导航 ============
+HSPLcom/java/myapplication/ui/EyeCareAppKt;->EyeCareApp(Lcom/java/myapplication/ui/EyeCareViewModel;Landroidx/compose/runtime/Composer;I)V
+HSPLcom/java/myapplication/ui/EyeCareAppKt;->TimerTab(Lcom/java/myapplication/ui/EyeCareViewModel;Landroid/content/Context;Landroidx/compose/runtime/Composer;I)V
+HSPLcom/java/myapplication/ui/EyeCareAppKt;->ReportTab(Lcom/java/myapplication/ui/EyeCareViewModel;Landroid/content/Context;Landroidx/compose/runtime/Composer;I)V
+HSPLcom/java/myapplication/ui/EyeCareAppKt;->buildReportAdvice(III F)Ljava/lang/String;
+
+# ============ ViewModel：每秒 tick 与首帧同步 ============
+HSPLcom/java/myapplication/ui/EyeCareViewModel;-><init>()V
+HSPLcom/java/myapplication/ui/EyeCareViewModel;->init(Landroid/content/Context;)V
+HSPLcom/java/myapplication/ui/EyeCareViewModel;->startTicking(Landroid/content/Context;)V
+HSPLcom/java/myapplication/ui/EyeCareViewModel;->clockTick(Landroid/content/Context;)V
+HSPLcom/java/myapplication/ui/EyeCareViewModel;->syncFromStore(Landroid/content/Context;)V
+HSPLcom/java/myapplication/ui/EyeCareViewModel;->syncFromStore(Landroid/content/Context;Lcom/java/myapplication/data/TimerState;)V
+HSPLcom/java/myapplication/ui/EyeCareViewModel;->onForeground(Landroid/content/Context;)V
+
+# ============ 计时状态机（启动时 resync 一次） ============
+HSPLcom/java/myapplication/timer/EyeTimer;-><clinit>()V
+HSPLcom/java/myapplication/timer/EyeTimer;->syncScreenState(Landroid/content/Context;)V
+HSPLcom/java/myapplication/timer/EyeTimer;->resync(Landroid/content/Context;Z)V
+HSPLcom/java/myapplication/timer/EyeTimer;->isScreenOn(Landroid/content/Context;)Z
+
+# ============ 持久化（每秒都要读） ============
+HSPLcom/java/myapplication/data/TimerStore;-><clinit>()V
+HSPLcom/java/myapplication/data/TimerStore;->load(Landroid/content/Context;)Lcom/java/myapplication/data/TimerState;
+HSPLcom/java/myapplication/data/TimerStore;->save(Landroid/content/Context;Lcom/java/myapplication/data/TimerState;)V
+HSPLcom/java/myapplication/data/TimerStore;->prefs(Landroid/content/Context;)Landroid/content/SharedPreferences;
+HSPLcom/java/myapplication/data/StatsStore;-><clinit>()V
+HSPLcom/java/myapplication/data/StatsStore;->todayWorkSeconds(Landroid/content/Context;)I
+HSPLcom/java/myapplication/data/StatsStore;->todayRestCount(Landroid/content/Context;)I
+HSPLcom/java/myapplication/data/StatsStore;->dailySeries(Landroid/content/Context;I)Ljava/util/List;
+HSPLcom/java/myapplication/data/StatsStore;->dayKeyOf(J)Ljava/lang/String;
+
+# ============ 主题 ============
+HSPLcom/java/myapplication/ui/theme/ThemeKt;-><clinit>()V
+HSPLcom/java/myapplication/ui/theme/MotionKt;-><clinit>()V

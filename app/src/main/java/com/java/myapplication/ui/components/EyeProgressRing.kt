@@ -18,7 +18,9 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.java.myapplication.ui.theme.CoralRed
+import com.java.myapplication.ui.theme.EaseOutStrong
 import com.java.myapplication.ui.theme.GrassGreen
+import com.java.myapplication.ui.theme.MotionDurations
 import com.java.myapplication.ui.theme.SunOrange
 
 // 「眼眸」形状的进度环：随用眼进度从绿 → 橙 → 红渐变
@@ -32,16 +34,9 @@ fun EyeProgressRing(
 ) {
     val animatedProgress by animateFloatAsState(
         targetValue = progress,
-        animationSpec = tween(durationMillis = 300),
+        animationSpec = tween(MotionDurations.MODAL_MS, easing = EaseOutStrong),
         label = "ringProgress"
     )
-
-    // 根据进度计算渐变颜色
-    val color = when {
-        animatedProgress < 0.6f -> GrassGreen
-        animatedProgress < 0.85f -> SunOrange
-        else -> CoralRed
-    }
 
     Box(modifier = modifier.size(size), contentAlignment = Alignment.Center) {
         Canvas(modifier = Modifier.size(size)) {

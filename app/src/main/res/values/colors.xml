@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 窗口背景色（浅色）。深色变体见 values-night/colors.xml。
+         只用于系统窗口底色，避免 Compose 首帧绘制前闪一下白屏。 -->
+    <color name="window_background">#FAF8F5</color>
+</resources>

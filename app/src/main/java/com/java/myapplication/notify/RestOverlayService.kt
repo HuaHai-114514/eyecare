@@ -7,6 +7,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
@@ -21,6 +22,7 @@ import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
+import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -58,6 +60,11 @@ class RestOverlayService : Service() {
 
         private const val CHANNEL_ID = "eye_care_overlay_v1"
         private const val NOTIFICATION_ID = 1010
+
+        /** 遮罩淡入时长：入口要「立刻盖上来」，所以短且走 ease-out */
+        private const val FADE_IN_MS = 200L
+        /** 自动到点收尾的淡出时长（用户主动收起走 dismissAndStop(fast = true)，140ms） */
+        private const val FADE_OUT_MS = 220L
 
         /** 是否拥有悬浮窗权限（Android 6+ 需用户单独授权） */
         fun canDrawOverlay(context: Context): Boolean {
@@ -102,6 +109,28 @@ class RestOverlayService : Service() {
     private var ringView: ProgressRingView? = null
     private var countdownText: TextView? = null
     private var dismissed = false
+
+    /** 正在做淡出动画、等待移除的覆盖层（淡出结束由 [forceCleanup] 兜底移除） */
+    private var fadingView: View? = null
+
+    /** 淡出兜底：动画因任何原因没跑完也要把覆盖层摘掉并停服务，避免留下无主悬浮窗 */
+    private val forceCleanup: Runnable = Runnable {
+        handler.removeCallbacks(forceCleanup)
+        val view = fadingView
+        fadingView = null
+        if (view != null) {
+            try { windowManager?.removeView(view) } catch (_: Exception) {}
+        }
+        stopForegroundCompat()
+        stopSelf()
+    }
+
+    /** 是否按深色渲染覆盖层：系统深色 **且** 用户开着「自动夜间模式」（与 App 内一致） */
+    private fun isDarkUi(): Boolean {
+        val night = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+            Configuration.UI_MODE_NIGHT_YES
+        return night && SettingsStore.load(this).autoNightMode
+    }
 
     private val tick = object : Runnable {
         override fun run() {
@@ -175,11 +204,22 @@ class RestOverlayService : Service() {
         val ctx = this
         val root = FrameLayout(ctx)
 
-        // 背景：纵向渐变（与 Compose 休息页保持同一套浅色配色）
-        val bg = GradientDrawable(
-            GradientDrawable.Orientation.TOP_BOTTOM,
+        // 配色跟随深色模式：这块全屏遮罩以前硬编码浅色，深色模式下会「啪」地糊一脸白光，
+        // 与护眼初衷正好相反。现在与 Compose 休息页（ui/RestScreen.kt）用同一套成对色值。
+        val dark = isDarkUi()
+        val titleColor = if (dark) 0xFFD9E3DC.toInt() else 0xFF2C3E33.toInt()
+        val subtitleColor = if (dark) 0xFF9FADA4.toInt() else 0xFF4F5F56.toInt()
+        val bodyColor = if (dark) 0xFF9FADA4.toInt() else 0xFF6B7A70.toInt()
+        val accentColor = if (dark) 0xFF7CC9A0.toInt() else 0xFF2F7A54.toInt()
+        val trackColor = if (dark) 0x33D9E3DC.toInt() else 0x1A4CAF7D.toInt()
+
+        // 背景：纵向渐变（深浅两套实心色，不依赖 alpha 叠加，保证对比度）
+        val bgColors = if (dark) {
+            intArrayOf(0xFF20302A.toInt(), 0xFF1F2A31.toInt(), 0xFF1A2420.toInt())
+        } else {
             intArrayOf(0xFFEAF3EC.toInt(), 0xFFE4EEF5.toInt(), 0xFFFAF8F5.toInt())
-        )
+        }
+        val bg = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, bgColors)
         root.background = bg
 
         val column = LinearLayout(ctx).apply {
@@ -196,11 +236,11 @@ class RestOverlayService : Service() {
         )
 
         // 顶部 emoji + 标题
-        column.addView(textView(ctx, "🌄", 48f, 0xFF2C3E33.toInt(), bold = false))
+        column.addView(textView(ctx, "🌄", 48f, titleColor, bold = false))
         column.addView(spacer(ctx, 16))
-        column.addView(textView(ctx, "请抬头，眺望远方", 28f, 0xFF2C3E33.toInt(), bold = true))
+        column.addView(textView(ctx, "请抬头，眺望远方", 28f, titleColor, bold = true))
         column.addView(spacer(ctx, 6))
-        column.addView(textView(ctx, "让眼睛离开屏幕，看向 6 米外的远方", 15f, 0xFF4F5F56.toInt()))
+        column.addView(textView(ctx, "让眼睛离开屏幕，看向 6 米外的远方", 15f, subtitleColor))
         column.addView(spacer(ctx, 32))
 
         // 倒计时环 + 中心大数字（与 App 内休息页的 EyeProgressRing 保持一致）
@@ -210,16 +250,17 @@ class RestOverlayService : Service() {
             total = restSeconds
             progress = 0f
             strokeDp = 18f
-            trackColor = 0x1A4CAF7D
+            this.trackColor = trackColor
+            arcShades = if (dark) ProgressRingView.DARK_SHADES else ProgressRingView.LIGHT_SHADES
         }
         ringView = ring
         ringBox.addView(
             ring,
             FrameLayout.LayoutParams(ringSize, ringSize, Gravity.CENTER)
         )
-        val countdown = textView(ctx, restSeconds.toString(), 64f, 0xFF2C3E33.toInt(), bold = true)
+        val countdown = textView(ctx, restSeconds.toString(), 64f, titleColor, bold = true)
         countdownText = countdown
-        val unit = textView(ctx, "秒", 14f, 0xFF4F5F56.toInt())
+        val unit = textView(ctx, "秒", 14f, subtitleColor)
         val countdownColumn = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
@@ -239,19 +280,19 @@ class RestOverlayService : Service() {
 
         // 护眼知识卡
         val tip = EyeTips.byIndex(tipIndex)
-        column.addView(textView(ctx, "${tip.emoji} ${tip.title}", 17f, 0xFF2C3E33.toInt(), bold = true))
+        column.addView(textView(ctx, "${tip.emoji} ${tip.title}", 17f, titleColor, bold = true))
         column.addView(spacer(ctx, 6))
-        column.addView(textView(ctx, tip.content, 15f, 0xFF6B7A70.toInt()))
+        column.addView(textView(ctx, tip.content, 15f, bodyColor))
         column.addView(spacer(ctx, 32))
 
         // 「我已休息好」按钮（Q8=b：允许提前结束）
-        val closeBtn = textView(ctx, "我已休息好，继续工作", 16f, 0xFF2F7A54.toInt(), bold = true).apply {
+        val closeBtn = textView(ctx, "我已休息好，继续工作", 16f, accentColor, bold = true).apply {
             setPadding(dp(24), dp(12), dp(24), dp(12))
             isClickable = true
             isFocusable = true
             background = GradientDrawable().apply {
                 cornerRadius = dp(24).toFloat()
-                setStroke(dp(2), 0xFF2F7A54.toInt())
+                setStroke(dp(2), accentColor)
                 setColor(Color.TRANSPARENT)
             }
             setOnClickListener { onUserDismiss() }
@@ -286,6 +327,15 @@ class RestOverlayService : Service() {
         try {
             wm.addView(root, params)
             overlayView = root
+            // 淡入：以前是「啪」地一下整屏盖上来，现在 200ms 渐显。
+            // 必须显式用 DecelerateInterpolator：ViewPropertyAnimator 默认是
+            // AccelerateDecelerate，起手慢，遮罩这种「立刻要盖上来」的入场会显得迟钝。
+            root.alpha = 0f
+            root.animate()
+                .alpha(1f)
+                .setDuration(FADE_IN_MS)
+                .setInterpolator(DecelerateInterpolator())
+                .start()
             root.requestFocus()
         } catch (_: Exception) {
             // 权限被回收 / ROM 拦截：安静退出，退回通知路径
@@ -297,19 +347,38 @@ class RestOverlayService : Service() {
     private fun onUserDismiss() {
         if (dismissed) return
         com.java.myapplication.timer.EyeTimer.skipRest(this)
-        dismissAndStop()
+        dismissAndStop(fast = true)
     }
 
-    private fun dismissAndStop() {
+    /**
+     * 收起覆盖层。
+     *
+     * [fast] = true 用于**用户主动**点「我已休息好」/ 返回键：用户已经做完决定了，
+     * 系统要立刻回应，所以退场取 140ms（非对称节奏：慢在用户决策，快在系统回应）。
+     * 自动倒计时结束仍走 220ms —— 那是系统自己发起的收尾，稍慢一点不显得突兀。
+     */
+    private fun dismissAndStop(fast: Boolean = false) {
         if (dismissed) return
         dismissed = true
         handler.removeCallbacks(tick)
-        overlayView?.let {
-            try { windowManager?.removeView(it) } catch (_: Exception) {}
-        }
+        val view = overlayView
         overlayView = null
-        stopForegroundCompat()
-        stopSelf()
+        if (view == null) {
+            stopForegroundCompat()
+            stopSelf()
+            return
+        }
+        val fadeMs = if (fast) 140L else FADE_OUT_MS
+        // 淡出后再移除；forceCleanup 兜底，动画被打断也不会留下无主悬浮窗
+        fadingView = view
+        handler.removeCallbacks(forceCleanup)
+        handler.postDelayed(forceCleanup, fadeMs + 100L)
+        view.animate()
+            .alpha(0f)
+            .setDuration(fadeMs)
+            .setInterpolator(DecelerateInterpolator())
+            .withEndAction(forceCleanup)
+            .start()
     }
 
     private fun stopForegroundCompat() {
@@ -322,8 +391,12 @@ class RestOverlayService : Service() {
 
     override fun onDestroy() {
         handler.removeCallbacks(tick)
+        handler.removeCallbacks(forceCleanup)
         overlayView?.let { try { windowManager?.removeView(it) } catch (_: Exception) {} }
         overlayView = null
+        // 淡出途中被销毁（例如用户手动停服务）：兜底摘掉残留的那个 View，避免 WindowLeaked
+        fadingView?.let { try { windowManager?.removeView(it) } catch (_: Exception) {} }
+        fadingView = null
         super.onDestroy()
     }
 
@@ -372,6 +445,13 @@ class ProgressRingView(context: Context) : View(context) {
     /** 轨道颜色（ARGB int） */
     var trackColor: Int = 0x1A4CAF7D
 
+    /**
+     * 进度弧的扫掠渐变色标（3 点 → 6 点 → 9 点 → 12 点 → 3 点）。
+     * 与 App 内 EyeProgressRing 的 Brush.sweepGradient 用同一组停点，
+     * 这样后台悬浮窗和 App 内休息页看起来才是同一个环。
+     */
+    var arcShades: IntArray = LIGHT_SHADES
+
     private val density = resources.displayMetrics.density
 
     private val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
@@ -387,21 +467,41 @@ class ProgressRingView(context: Context) : View(context) {
         val rect = android.graphics.RectF(inset, inset, width - inset, height - inset)
 
         // 轨道
+        paint.shader = null
         paint.color = trackColor
         canvas.drawArc(rect, -90f, 360f, false, paint)
 
-        // 进度弧（颜色随进度 绿→橙→红）
+        // 进度弧：单色硬分档（绿/橙/红三段）已改为与 Compose 端一致的连续扫掠渐变
         val p = progress.coerceIn(0f, 1f)
         if (p > 0f) {
-            paint.color = ringColor(p)
+            paint.shader = android.graphics.SweepGradient(
+                rect.centerX(), rect.centerY(), arcShades, null
+            )
             canvas.drawArc(rect, -90f, 360f * p, false, paint)
+            paint.shader = null
         }
     }
 
-    /** 与 Compose 端一致的分档配色：<0.6 绿；<0.85 橙；否则红 */
-    private fun ringColor(p: Float): Int = when {
-        p < 0.6f -> 0xFF4CAF7D.toInt()
-        p < 0.85f -> 0xFFF5A623.toInt()
-        else -> 0xFFE57373.toInt()
+    companion object {
+        /**
+         * 浅色：与 Compose 端 EyeProgressRing 的 Brush.sweepGradient 停点逐值对齐
+         * （0.00/0.25 停点分别取 lerp(GrassGreen,SunOrange,0.25) 与 lerp(SunOrange,CoralRed,0.5)）。
+         */
+        val LIGHT_SHADES = intArrayOf(
+            0xFF76AC66.toInt(),  // 3 点：绿→橙 25%
+            0xFFF5A623.toInt(),  // 6 点：SunOrange
+            0xFFED8C4B.toInt(),  // 9 点：橙→红 50%
+            0xFF4CAF7D.toInt(),  // 12 点：GrassGreen（弧起点）
+            0xFF76AC66.toInt()   // 回到 3 点闭合
+        )
+
+        /** 深色：同结构换成 NightGreen/NightOrange/NightRed，避免夜间遮罩上一圈荧光 */
+        val DARK_SHADES = intArrayOf(
+            0xFF7C9C6E.toInt(),
+            0xFFD8994A.toInt(),
+            0xFFCE8A62.toInt(),
+            0xFF5E9E7B.toInt(),
+            0xFF7C9C6E.toInt()
+        )
     }
 }

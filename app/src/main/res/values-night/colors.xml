@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 窗口背景色（夜间）：跟随系统深色，避免启动瞬间闪白。 -->
+    <color name="window_background">#1A2420</color>
+</resources>
