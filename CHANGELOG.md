@@ -37,6 +37,28 @@ README 只保留精简版的版本历史与更新日志简表；需要追溯细�
 
 ## v2.6.11 改动摘要
 
+### 修复「用眼时长统计不实」（虚高与漏记并存）
+
+**现象**：报告页的用眼时长与系统「屏幕使用时间」对不上，且**两个方向都出现过**——先是记录虚高（屏幕实际亮 ~2 小时，应用记成 ~6 小时），修完又出现漏记（实际用眼 1 小时只记到 36 分钟）。
+
+**根因**：结算用「本次会话累计值」直接当增量写入统计，没有「已结算到哪里」的记忆。
+
+- `workAccumMs` 是**段内累计**，每次结算都把整段累计值当成新增时长再记一遍 → 同一段时长被反复累加，**时长翻倍**。
+- 补上去重水位线后出现反向问题：`onScreenOn`、`postponeRest`、`endRestPhase`、`resync` 这四处会**清零 `workAccumMs` 开启新一段，却没有同步清零水位线**。水位线仍停在旧的高位，新一段一开始就被「压住」，`already` 被 `coerceIn(0, accum)` 顶到上限、`deltaSec` 恒为 0 → **新一段整段漏记**。这正好解释了 20 分钟周期连做 3 轮却只记到第 1 轮的现象。
+
+**方案**：
+1. **`TimerStore` 新增 `recordedAccumMs` 水位线**（`KEY_RECORDED_ACCUM_MS = "recorded_accum_ms"`），记录「这段累计值已结算到哪个位置」，随 `TimerState` 落盘持久化。
+2. **`EyeTimer.recordWorkSession` 改为幂等结算**：只写入 `workAccumMs - recordedAccumMs` 的增量，写完立刻把水位线抬到当前 `workAccumMs`。增量不足 `MIN_RECORD_SECONDS`（5 秒）时**不写统计但照样抬水位线**，避免零头在后续出口被反复凑成一段重复计入。
+3. **自愈兜底**：结算前若发现 `recordedAccumMs > workAccumMs`（说明累计被重置过），视为本段尚未结算、按 0 处理。这样即使某条路径漏了清零，也不会把新一段永远压死。
+4. **在所有重置累计的出口同步清零水位线**：`onScreenOn`、`postponeRest`、`endRestPhase`、`resync`，以及跨天切换 `rollOverIfDayChanged`（新一段从零点起算，两者同步归零）。
+5. **修复超时用眼与正常结算的重复计数**：超时段结算（`overdueRecordedMs`）与 `recordWorkSession` 曾对同一段时长各记一次，是时长翻倍的根因之一，已按水位线口径统一。
+
+**验证**：新增 `WorkStatDedupTest`（13 例）覆盖去重与水位线语义；新增 `TickerCostTest`（3 例）锁住「每秒最多落盘一次」。`TickerCostTest` 做过**变异测试**确认非空：把 `EyeCareViewModel.kt` 的按需落盘改回无条件落盘后，`TickerCostTest > clockTick 每秒最多落盘一次` 确实 FAILED，还原后通过。全量单元测试 **46/46 通过**。
+
+**用户已真机验收通过。**
+
+---
+
 ### 修复「页面切换动画掉帧卡顿」（尤其冷启动后第一次切换）
 
 **现象**：底部导航在板块之间切换时掉帧，**冷启动后的第一次切换尤其明显**，之后正常。
