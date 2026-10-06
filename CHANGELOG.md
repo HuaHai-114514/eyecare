@@ -74,6 +74,19 @@ README 只保留精简版的版本历史与更新日志简表；需要追溯细�
 3. **手写 `app/src/main/baseline-prof.txt`**（30 条，覆盖冷启动与首次切换热点）。**仅 release 生效**（已验证 debug 包内无 `baseline.prof`，AGP 只给 release 打），release 内为 `assets/dexopt/baseline.prof`，安装时 AOT 编译。
 4. **降低每秒常驻开销**：`clockTick` 一次 tick 只读一次盘、且只在真跨天时落盘（原为每秒无条件 `save`）；`StatsStore` 新增只读视图 `readAll`/`readAllToday`（原 `loadAll` 命中缓存仍整表复制，最多 90 天，而读「今日用眼秒数」也走这条路，每秒 7 次）；`ReportTab` 缓存键由秒级改分钟级（该页时长本就以分钟展示，秒级却每秒作废 `remember` 并重跑三次全表计算）。
 
+### 动效改为 Apple 弹簧规范
+
+参照 Apple《Designing Fluid Interfaces》：**弹簧只用「阻尼比 + 响应」两个参数描述**，而不该用「起止值 + 固定时长」；约定是**默认临界阻尼（`dampingRatio = 1.0`）不弹跳，只有手势本身带了动量时才允许回弹（~0.8）**。据此把全项目动效从「固定时长 tween」改为按场景选择弹簧或时长：
+
+1. **底部导航落页**：`SettleSpring = spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow)`（`ui/theme/Motion.kt`）。底部导航是**系统发起**的落位动作，没有动量需要延续，所以用临界阻尼、不回弹；回弹会显得油滑而不准。
+2. **卡片轮播**：跟手 **1:1**、**可打断**、**松手时速度交接**、到边界有**阻尼**；松手回弹用 `spring(dampingRatio = 0.82f, stiffness = Spring.StiffnessMediumLow)`——这里允许回弹，因为动量是用户手势自己甩出来的。
+3. **动量去留改由速度判断**：`flingVelocityPx`（由 `300.dp` 换算的 px/s）决定是翻页还是弹回，**不再看拖动距离**——位移多少与「用户是否想翻页」无关。
+4. **不需要弹性的场景仍用时长**，但统一走 `Motion.kt` token 与曲线：入场/退场用 ease-out（`EaseOutStrong = CubicBezierEasing(0.23f, 1f, 0.32f, 1f)`），屏幕内移动用 ease-in-out，**永不 ease-in**。
+
+**落地位置**：`ui/theme/Motion.kt`（弹簧参数与时长 token）、`ui/EyeCareApp.kt`（Pager 与导航弹簧）、`ui/Cards.kt`（轮播手势与速度判据）。
+
+---
+
 **顺带完成的动效复审（11 项）**：删除休息页倒计时每秒 fade+scale、删除柱状图 520ms 生长动画、设置页 Snackbar 加 600ms 静默窗口（原长按连点 ~11Hz 重播）、轮播跟手由 `Modifier.offset{}` 改 `graphicsLayer`、松手回弹由位移阈值改**速度阈值**、拖拽期不再每事件起协程、页点由动画 `width` 改 `scaleX`、步进器补按压反馈与无障碍语义、悬浮窗入场补 ease-out 插值器并按场景分退出时长、全项目裸 `tween` 统一走 `Motion.kt` token。
 
 **刻意不改**：进度环 300ms（State indication）、休息页整页入场（只收时长到 `MODAL_MS`）、免打扰卡淡入（频率低）、日/周/月档位切换不加过渡（用户要立刻看到数字）。
