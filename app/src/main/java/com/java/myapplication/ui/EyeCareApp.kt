@@ -388,6 +388,7 @@ private fun TimerTab(
         TodayWorkSummaryCard(
             screenOnSeconds = timerScreenOnSeconds,
             restCount = viewModel.todayCount,
+            restSeconds = viewModel.todaySeconds,
             goalMinutes = viewModel.settings.dailyGoalMinutes,
             onRequestScreenTime = if (timerHasUsageAccess) null else timerRequestUsageAccess
         )
@@ -451,22 +452,13 @@ private fun ReportTab(viewModel: EyeCareViewModel, context: Context) {
     val workData = remember(labels, screenOnDaily) {
         labels.mapIndexed { i, l -> l to ((screenOnDaily.getOrNull(i)?.toInt() ?: 0) / 60) }
     }
-    val restData = remember(stats, labels) { stats.mapIndexed { i, s -> labels[i] to s.restCount } }
-
-    // 汇总数字跟上面的数据同生命周期：跟它一起 remember，避免每秒跟着重组重算。
-    val totalWork = remember(screenOnDaily) { screenOnDaily.filterNotNull().sumOf { it.toInt() } }
-    val totalRest = remember(stats) { stats.sumOf { it.restCount } }
-    // 「最长连续」在亮屏口径下没有对应物，改为展示区间内**单日亮屏最多**的那一天。
-    val peakDay = remember(screenOnDaily) { screenOnDaily.filterNotNull().maxOrNull()?.toInt() ?: 0 }
-    val trend = remember(range, statsKey, screenOnDaily) {
-        // 用亮屏口径算环比：后半段均值 vs 前半段均值。
-        val v = screenOnDaily.filterNotNull().map { it.toInt() }
-        if (v.size < 4) 0f else {
-            val half = v.size / 2
-            val first = v.take(half).average().toFloat()
-            val second = v.drop(half).average().toFloat()
-            if (first <= 0f) 0f else (second - first) / first * 100f
-        }
+    // v2.7.1：休息侧由「次数」改为「时长（分钟）」。原来两张图共用一根 Y 轴，
+    // 却拿「分钟」和「次」相比：数值差两个数量级，柱子按同一 maxValue 缩放，
+    // 休息柱永远只有百分之几高，且两根柱子的高度本就不具可比性。
+    // 改用 DailyStat.restSeconds（addRest 逐次累加的**真实**休息秒数），
+    // 与亮屏同为时长口径，两张图上下排布时量纲一致。
+    val restData = remember(stats, labels) {
+        stats.mapIndexed { i, s -> labels[i] to (s.restSeconds / 60) }
     }
 
     Column(
@@ -501,6 +493,7 @@ private fun ReportTab(viewModel: EyeCareViewModel, context: Context) {
         TodayWorkSummaryCard(
             screenOnSeconds = screenOnSeconds,
             restCount = viewModel.todayCount,
+            restSeconds = viewModel.todaySeconds,
             goalMinutes = viewModel.settings.dailyGoalMinutes,
             onRequestScreenTime = if (hasUsageAccess) null else {
                 {
@@ -517,68 +510,86 @@ private fun ReportTab(viewModel: EyeCareViewModel, context: Context) {
 
         Spacer(Modifier.height(20.dp))
 
-        // 汇总指标
-        SoftCard {
-            Text(
-                "近 ${range.days} 天汇总",
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            Spacer(Modifier.height(12.dp))
-            Row(modifier = Modifier.fillMaxWidth()) {
-                StatItem(
-                    value = if (hasUsageAccess) formatDurationShort(totalWork) else "--",
-                    label = "亮屏总时长",
-                    modifier = Modifier.weight(1f)
-                )
-                StatItem(
-                    value = if (hasUsageAccess) formatDurationShort(peakDay) else "--",
-                    label = "单日最多",
-                    modifier = Modifier.weight(1f)
-                )
-                StatItem(
-                    value = "$totalRest",
-                    label = "休息次数",
-                    modifier = Modifier.weight(1f)
-                )
-            }
-            Spacer(Modifier.height(14.dp))
-            Text(
-                buildReportAdvice(peakDay, trend, totalWork),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-
-        Spacer(Modifier.height(20.dp))
-
-        // 双序列柱状图：用眼（分钟） + 休息（次数）
-        SoftCard {
-            Text(
-                "每日亮屏 / 休息对比",
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            Spacer(Modifier.height(6.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                LegendDot(color = GrassGreen, text = "亮屏(分钟)")
-                Spacer(Modifier.width(14.dp))
-                LegendDot(color = MistBlue, text = "休息(次)")
-            }
-            Spacer(Modifier.height(16.dp))
-            DailyBarChart(
+        // v2.7.1：原「亮屏 / 休息对比」把两种**不同量纲**画进同一坐标系 ——
+        // 左轴是分钟、右轴是次数，柱高却按同一个 maxValue 缩放，既不可比
+        // （「亮屏柱比休息柱高」没有含义），休息柱也永远矮得看不见。
+        // 现拆成两张独立图表，各自一根 Y 轴；休息侧同时由「次数」改为「时长」，
+        // 使两张图量纲一致，上下排布时可横向参照。
+        // v2.7.1：日档位不画柱状图。柱状图的价值在**多天横向比较**，只有一天
+        // 数据时，一根柱子无论多宽都别扭（曾出现 145dp 宽、圆角 72dp 的胶囊），
+        // 且这张图与上面「今日用眼小结」的数字完全重复。日档位的信息已由那张卡
+        // 承载（亮屏时长 / 休息次数 / 休息时长三项 + 目标进度），故此处整体隐藏。
+        if (range != ReportRange.DAY) {
+            ChartCard(
+                title = "每日亮屏时长",
+                legendColor = GrassGreen,
+                legendText = "亮屏(分钟)",
                 data = workData,
-                secondData = restData
+                stats = stats
             )
-            Spacer(Modifier.height(6.dp))
-            // 横轴：不再「每个日期一个等宽槽位」（30 天时每格仅 ~11dp，
-            // "9/1" 会被截断成 "9"，就是之前看到的「只有月份没日期」）。
-            // 改为独立刻度行：按档位固定少量刻度（最多 6 个），每个刻度用
-            // 非等分排布，保证每个标签都有足够宽度完整显示。
-            DateAxis(stats = stats)
+
+            Spacer(Modifier.height(20.dp))
+
+            ChartCard(
+                title = "每日休息时长",
+                legendColor = MistBlue,
+                legendText = "休息(分钟)",
+                data = restData,
+                stats = stats,
+                valueLabel = "休息",
+                barColor = MistBlue,
+                emptyColor = MistBlue
+            )
         }
 
         Spacer(Modifier.height(24.dp))
+    }
+}
+
+/**
+ * 单序列按日图表卡片：标题 + 图例 + 柱状图 + 横轴。
+ *
+ * v2.7.1 抽出。原先是「亮屏 / 休息」共用一张双序列卡，但两者量纲不同
+ * （分钟 vs 次数），共用一根 Y 轴既不可比、柱子高度也失真。拆成两张单序列卡，
+ * 每张各自按自己的最大值缩放，高度才真实。
+ *
+ * @param legendColor 图例圆点颜色，同时作为柱子颜色
+ * @param data 逐日数据（标签 → 数值），单位由调用方决定，默认分钟
+ */
+@Composable
+private fun ChartCard(
+    title: String,
+    legendColor: androidx.compose.ui.graphics.Color,
+    legendText: String,
+    data: List<Pair<String, Int>>,
+    stats: List<com.java.myapplication.data.DailyStat>,
+    barColor: androidx.compose.ui.graphics.Color = GrassGreen,
+    emptyColor: androidx.compose.ui.graphics.Color = GrassGreen,
+    valueLabel: String = "亮屏"
+) {
+    SoftCard {
+        Text(
+            title,
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        Spacer(Modifier.height(6.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            LegendDot(color = legendColor, text = legendText)
+        }
+        Spacer(Modifier.height(16.dp))
+        DailyBarChart(
+            data = data,
+            barColor = barColor,
+            emptyColor = emptyColor,
+            primaryLabel = valueLabel
+        )
+        Spacer(Modifier.height(6.dp))
+        // 横轴：不再「每个日期一个等宽槽位」（30 天时每格仅 ~11dp，
+        // "9/1" 会被截断成 "9"，就是之前看到的「只有月份没日期」）。
+        // 改为独立刻度行：按档位固定少量刻度（最多 6 个），每个刻度用
+        // 非等分排布，保证每个标签都有足够宽度完整显示。
+        DateAxis(stats = stats)
     }
 }
 
@@ -666,33 +677,6 @@ private fun shortDayLabel(dayKey: String): String {
     } catch (_: Exception) {
         dayKey
     }
-}
-
-/**
- * 依据数据生成一句轻提示（v2.6.16：口径已改为系统亮屏时长）。
- *
- * 原来的「单次最长连续用眼」在亮屏口径下没有对应物（亮屏时长不关心连续性），
- * 改为提示**单日亮屏峰值**；「达标率」原来按自统计的每日用眼目标达成天数算，
- * 口径与亮屏不一致，一并去掉，只留峰值与环比两条永远可信的。
- */
-private fun buildReportAdvice(
-    peakDaySeconds: Int,
-    trend: Float,
-    totalScreenOnSeconds: Int
-): String {
-    if (totalScreenOnSeconds <= 0) {
-        return "这段时间还没有记录，从今天开始吧 🌱"
-    }
-    val parts = mutableListOf<String>()
-    val peakMin = peakDaySeconds / 60
-    if (peakMin > 0) {
-        parts.add("单日亮屏最多 ${peakMin} 分钟")
-    }
-    if (trend >= 0f) {
-        val pct = (trend * 100).toInt()
-        parts.add(if (pct > 0) "环比上升 $pct%" else "环比下降 ${-pct}%")
-    }
-    return parts.joinToString(" · ")
 }
 
 private fun requestNotificationPermission(context: Context) {

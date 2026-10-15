@@ -63,7 +63,10 @@ fun DailyBarChart(
     secondData: List<Pair<String, Int>>? = null,
     secondColor: Color = MistBlue,
     primaryUnit: String = "分钟",
-    secondaryUnit: String = "次"
+    secondaryUnit: String = "次",
+    // v2.7.1：读数行的量名参数化。拆成两张单序列图后，第二张画的是休息时长，
+    // 沿用「用眼」会张冠李戴。
+    primaryLabel: String = "用眼"
 ) {
     // 为空时统一退化为空列表，dual 由它派生，避免对可空参数做多余的空判断
     val secondValues: List<Pair<String, Int>> = secondData.orEmpty()
@@ -106,7 +109,7 @@ fun DailyBarChart(
                     val rest = secondValues.getOrNull(index)?.second ?: 0
                     val suffix = if (dual) " · 休息 $rest$secondaryUnit" else ""
                     Text(
-                        text = "$label · 用眼 ${work}$primaryUnit$suffix",
+                        text = "$label · $primaryLabel ${work}$primaryUnit$suffix",
                         style = MaterialTheme.typography.labelSmall,
                         color = primary,
                         fontWeight = FontWeight.Medium
@@ -138,7 +141,12 @@ fun DailyBarChart(
 
             // 每个槽位间隔 = 半根柱子宽度，保证柱子间留白
             val slotWidth = size.width / (slots * 1.5f)
-            val barWidth = if (dual) slotWidth * 0.62f / 2f else slotWidth * 0.62f
+            val rawBarWidth = if (dual) slotWidth * 0.62f / 2f else slotWidth * 0.62f
+            // v2.7.1：柱宽加封顶。日档位只有 1 个槽位，slotWidth≈尺寸的 2/3，
+            // 柱子会被画成一根 140dp 宽、圆角 70dp 的胶囊，糊在画布正中。
+            // 封顶后柱宽不再随槽位数量放大，少柱时居中留白也自然。
+            val maxBarWidth = if (dual) 22.dp.toPx() else 44.dp.toPx()
+            val barWidth = rawBarWidth.coerceAtMost(maxBarWidth)
             val step = size.width / slots
             val baseInset = (step - (if (dual) barWidth * 2 + 4.dp.toPx() else barWidth)) / 2f
 

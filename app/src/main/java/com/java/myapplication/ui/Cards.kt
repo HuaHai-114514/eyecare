@@ -19,6 +19,7 @@ import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.TextAutoSize
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -35,6 +36,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.java.myapplication.ui.components.EyeIcons
@@ -324,20 +326,40 @@ fun TipCarousel(
     }
 }
 
+/**
+ * 数值 + 标签的统计项。
+ *
+ * v2.7.1：数字改为**自适应字号**。原先固定 30sp，「5小时58分」共 6 个字符约需
+ * 175dp，而三列布局每列只有 ~117dp，于是「分」被挤到第三行（五小时五十八分 →
+ * 两行 + 孤字），读起来很累。现在让字号在 30sp→16sp 之间按步长自动收缩，
+ * 宽度不够就整体缩小，永不断行；`maxLines = 1` 作为兜底。
+ *
+ * 注意：`autoSize` 只在**有界宽度**下生效，调用方必须给 `modifier` 一个确定
+ * 宽度（本项目均为 `weight(1f)` 或 `width(...)`）。
+ */
 @Composable
 fun StatItem(value: String, label: String, modifier: Modifier = Modifier) {
     Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
         Text(
-            value,
+            text = value,
+            autoSize = TextAutoSize.StepBased(
+                minFontSize = 16.sp,
+                maxFontSize = 30.sp,
+                stepSize = 1.sp
+            ),
             fontSize = 30.sp,
             fontWeight = FontWeight.Medium,
-            color = MaterialTheme.colorScheme.onSurface
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Clip
         )
         Spacer(Modifier.height(4.dp))
         Text(
             label,
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1
         )
     }
 }
@@ -361,6 +383,7 @@ fun StatItem(value: String, label: String, modifier: Modifier = Modifier) {
 fun TodayWorkSummaryCard(
     screenOnSeconds: Long?,
     restCount: Int,
+    restSeconds: Int,
     goalMinutes: Int,
     onRequestScreenTime: (() -> Unit)? = null
 ) {
@@ -416,6 +439,13 @@ fun TodayWorkSummaryCard(
             StatItem(
                 value = "$restCount",
                 label = "休息次数",
+                modifier = Modifier.weight(1f)
+            )
+            // v2.7.1：补上休息时长。日档位不再画柱状图（单日数据没有横向比较的
+            // 意义），休息侧的信息全靠这张卡承载，因此「次数」与「时长」都展示。
+            StatItem(
+                value = formatDurationShort(restSeconds),
+                label = "休息时长",
                 modifier = Modifier.weight(1f)
             )
         }
