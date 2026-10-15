@@ -2,6 +2,7 @@ package com.java.myapplication.ui
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.compose.animation.AnimatedVisibility
@@ -9,6 +10,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -31,12 +33,14 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.java.myapplication.data.AppSettings
 import com.java.myapplication.data.OnboardingStore
+import com.java.myapplication.data.ScreenTimeStore
 import com.java.myapplication.data.StatsStore
 import com.java.myapplication.notify.RestNotifier
 import com.java.myapplication.ui.components.DailyBarChart
 import com.java.myapplication.ui.components.EyeIcons
 import com.java.myapplication.ui.components.EyeProgressRing
 import com.java.myapplication.ui.theme.*
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
@@ -107,6 +111,10 @@ fun EyeCareApp(viewModel: EyeCareViewModel = viewModel()) {
     // 所以不该有回弹 —— 回弹只留给用户甩出来的手势。
     val scope = rememberCoroutineScope()
     val goTo: (Tab) -> Unit = { tab ->
+        // 先落高亮再起动画：settledPage 要等弹簧完全收敛才更新，
+        // 只靠它驱动的话，点了导航得等整段滑动结束，图标和药丸才跟上。
+        // 点击是明确的用户意图，应该立即反馈；settledPage 监听继续负责手势滑动。
+        currentTab = tab
         if (pagerState.currentPage != tab.ordinal) {
             scope.launch {
                 pagerState.animateScrollToPage(tab.ordinal, animationSpec = SettleSpring)
@@ -225,6 +233,30 @@ private fun TimerTab(
     viewModel: EyeCareViewModel,
     context: Context
 ) {
+    // 系统亮屏时长（v2.6.16）：统计页唯一的数据源。
+    // 亮屏时长会随时间自然增长，因此每分钟推进一次 tick 作为缓存键 ——
+    // 这一页只以分钟展示，秒级变化看不出来，却会让 remember 每秒重查一次
+    // 系统事件表（queryEvents 要遍历当天全部亮灭屏事件，代价不小）。
+    var timerHasUsageAccess by remember { mutableStateOf(ScreenTimeStore.hasPermission(context)) }
+    var timerMinuteTick by remember { mutableLongStateOf(System.currentTimeMillis() / 60_000L) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(60_000L)
+            timerMinuteTick = System.currentTimeMillis() / 60_000L
+        }
+    }
+    val timerScreenOnSeconds = remember(timerHasUsageAccess, timerMinuteTick) {
+        if (timerHasUsageAccess) ScreenTimeStore.todayScreenOnSeconds(context) else null
+    }
+    val timerRequestUsageAccess: (() -> Unit)? = {
+        runCatching {
+            context.startActivity(
+                ScreenTimeStore.permissionIntent().addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        }
+        // 回到前台时由下面的生命周期钩子重查授权状态
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -233,17 +265,21 @@ private fun TimerTab(
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         // 顶部标题（设置入口统一放在底部导航，避免同一功能两处入口）
-        Text(
-            "护眼时光",
-            style = MaterialTheme.typography.headlineLarge,
-            fontWeight = FontWeight.Medium,
-            color = MaterialTheme.colorScheme.onBackground
-        )
-        Text(
-            "给眼睛一片呼吸的原野",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
+        // 这一列整体是居中的（进度环、按钮需要），但标题单独包一层占满宽度，
+        // 走默认的 Start 对齐 —— 三个页面的标题就都在同一条左基准线上。
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Text(
+                "护眼时光",
+                style = MaterialTheme.typography.headlineLarge,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onBackground
+            )
+            Text(
+                "给眼睛一片呼吸的原野",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
 
         Spacer(Modifier.height(20.dp))
 
@@ -255,17 +291,33 @@ private fun TimerTab(
         ) {
             Column {
                 SoftCard {
-                    Text(
-                        "🌙 免打扰时段进行中",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        "这段时间只为你计时，不会打扰你。出时段后自动恢复提醒。",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    // v2.6.20：原标题写作「🌙 免打扰时段进行中」。emoji 走系统彩色字体，
+                    // 与 titleSmall 的基线、字重都不一致，是自检页那类「不齐」的同源问题。
+                    // 这里不另加图标，改用左侧一道竖向色条标记「静音中」——比再塞一个
+                    // 图形更克制，也避免每张卡片都顶一个图标导致的重复。
+                    Row {
+                        Box(
+                            Modifier
+                                .width(3.dp)
+                                .height(38.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(MaterialTheme.colorScheme.tertiary)
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                "免打扰时段进行中",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "这段时间只为你计时，不会打扰你。出时段后自动恢复提醒。",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                 }
                 Spacer(Modifier.height(20.dp))
             }
@@ -321,7 +373,7 @@ private fun TimerTab(
                 containerColor = MaterialTheme.colorScheme.primary
             )
         ) {
-            Text("🌿 现在休息一下", fontSize = 18.sp, fontWeight = FontWeight.Medium)
+            Text("现在休息一下", fontSize = 18.sp, fontWeight = FontWeight.Medium)
         }
 
         Spacer(Modifier.height(24.dp))
@@ -332,11 +384,12 @@ private fun TimerTab(
         Spacer(Modifier.height(24.dp))
 
         // 今日用眼小结（实用向核心）
+        // v2.6.16：主指标已改为系统亮屏时长，与报告页同源同口径。
         TodayWorkSummaryCard(
-            workSeconds = viewModel.todayWorkSeconds,
-            longestStreakSeconds = viewModel.todayLongestStreak,
+            screenOnSeconds = timerScreenOnSeconds,
             restCount = viewModel.todayCount,
-            goalMinutes = viewModel.settings.dailyGoalMinutes
+            goalMinutes = viewModel.settings.dailyGoalMinutes,
+            onRequestScreenTime = if (timerHasUsageAccess) null else timerRequestUsageAccess
         )
 
         Spacer(Modifier.height(24.dp))
@@ -348,36 +401,73 @@ private fun TimerTab(
 private fun ReportTab(viewModel: EyeCareViewModel, context: Context) {
     var range by remember { mutableStateOf(ReportRange.WEEK) }
 
-    // 缓存键：今日累计是「统计有没有变」的可观测信号 —— 每记一笔今日数据就变。
-    // 换用 Pager 之后这一页不再被销毁重建（±1 页常驻），所以必须有这么个键
-    // 才知道该重新读一次；否则回到报告页永远看到进页面那一眼的旧快照。
-    //
-    // 按**分钟**取整而不是直接用秒：这一页所有读数都是以分钟展示的
-    // （`s.workSeconds / 60`），秒级变化在这一页上根本看不出来，
-    // 却会让 remember 每秒作废一次 —— 而每次作废要重跑
-    // dailySeries + achievementRate + workTrendPercent 三遍整表计算。
-    // 取整到分钟后，同一分钟内数字完全一致，计算量直接降到 1/60。
-    val statsKey = (viewModel.todayWorkSeconds / 60) to viewModel.todayCount
+    // 缓存键：App 自统计的今日累计已在 v2.6.16 废止（数字不可信、虚高），
+    // 报告页的所有口径都改由系统亮屏时长驱动，故缓存键也换成「当前分钟」。
+    //   1. 亮屏时长本身随时间增长，用当前分钟做键即可拿到新鲜读数；
+    //   2. 休息次数仍是自统计的（这条链路没有虚高问题），一并参与做键。
+    // 按**分钟**取整而不是用秒：这一页所有读数都以分钟展示，秒级变化看不出来，
+    // 却会让 remember 每秒作废一次；而每次作废要重跑 dailySeries +
+    // dailyScreenOnSeconds 两遍整表计算。取整到分钟后同一分钟内数字完全一致，
+    // 计算量直接降到 1/60。
+    var minuteTick by remember { mutableLongStateOf(System.currentTimeMillis() / 60_000L) }
+    val statsKey = minuteTick to viewModel.todayCount
     val goalMinutes = viewModel.settings.dailyGoalMinutes
+
+    // 系统亮屏时长：同样是「统计有没有变」的可观测键，跟着 statsKey 一起失效。
+    // 没有「使用情况访问权限」时为 null，卡片会显示一个引导授权的入口。
+    var hasUsageAccess by remember { mutableStateOf(ScreenTimeStore.hasPermission(context)) }
+    val screenOnSeconds = remember(statsKey, hasUsageAccess) {
+        if (hasUsageAccess) ScreenTimeStore.todayScreenOnSeconds(context) else null
+    }
+    // 每分钟推进一次 minuteTick，让上面的缓存键在亮屏时长增长后自然失效。
+    // 只在页面可见时计时（这一页由 Pager 常驻，不依赖组合生命周期做可见性判断，
+    // 故用最简单的 while 循环 + delay；成本是一次 60 秒的协程唤醒）。
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(60_000L)
+            minuteTick = System.currentTimeMillis() / 60_000L
+        }
+    }
+
+    // 休息次数仍走自统计（这条链路由休息完成事件直接触发，没有虚高问题）。
     val stats = remember(range, statsKey) {
         StatsStore.dailySeries(context, range.days)
+    }
+
+    // v2.6.16：用眼时长的逐日数据改由**系统亮屏时长**提供，与今日卡片同口径。
+    // 未授权时整体为 null，图表显示空态并给出授权入口。
+    val screenOnDaily = remember(range, statsKey, hasUsageAccess) {
+        if (hasUsageAccess) {
+            ScreenTimeStore.dailyScreenOnSeconds(context, range.days)
+        } else {
+            List(range.days) { null }
+        }
     }
 
     // 横轴标签：用短格式「M/d」（如 9/1），比 MM-dd 更省宽度；
     // 30 天档位下 30 个标签会挤成一片、数字被压坏（图 1 的乱码就是这么来的），
     // 因此额外做「抽稀」：只保留少量关键刻度，其余留空，见下方 axisLabels。
     val labels = remember(stats) { stats.map { shortDayLabel(it.dayKey) } } // M/d
-    val workData = remember(stats) { stats.mapIndexed { i, s -> labels[i] to (s.workSeconds / 60) } }
-    val restData = remember(stats) { stats.mapIndexed { i, s -> labels[i] to s.restCount } }
-
-    // 汇总数字跟 stats 同生命周期：跟它一起 remember，避免每秒跟着重组重算。
-    val totalWork = remember(stats) { stats.sumOf { it.workSeconds } }
-    val totalRest = remember(stats) { stats.sumOf { it.restCount } }
-    val longest = remember(stats) { stats.maxOfOrNull { it.longestStreakSeconds } ?: 0 }
-    val rate = remember(range, goalMinutes, statsKey) {
-        StatsStore.achievementRate(context, range.days, goalMinutes)
+    val workData = remember(labels, screenOnDaily) {
+        labels.mapIndexed { i, l -> l to ((screenOnDaily.getOrNull(i)?.toInt() ?: 0) / 60) }
     }
-    val trend = remember(range, statsKey) { StatsStore.workTrendPercent(context, range.days) }
+    val restData = remember(stats, labels) { stats.mapIndexed { i, s -> labels[i] to s.restCount } }
+
+    // 汇总数字跟上面的数据同生命周期：跟它一起 remember，避免每秒跟着重组重算。
+    val totalWork = remember(screenOnDaily) { screenOnDaily.filterNotNull().sumOf { it.toInt() } }
+    val totalRest = remember(stats) { stats.sumOf { it.restCount } }
+    // 「最长连续」在亮屏口径下没有对应物，改为展示区间内**单日亮屏最多**的那一天。
+    val peakDay = remember(screenOnDaily) { screenOnDaily.filterNotNull().maxOrNull()?.toInt() ?: 0 }
+    val trend = remember(range, statsKey, screenOnDaily) {
+        // 用亮屏口径算环比：后半段均值 vs 前半段均值。
+        val v = screenOnDaily.filterNotNull().map { it.toInt() }
+        if (v.size < 4) 0f else {
+            val half = v.size / 2
+            val first = v.take(half).average().toFloat()
+            val second = v.drop(half).average().toFloat()
+            if (first <= 0f) 0f else (second - first) / first * 100f
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -390,11 +480,6 @@ private fun ReportTab(viewModel: EyeCareViewModel, context: Context) {
             style = MaterialTheme.typography.headlineLarge,
             fontWeight = FontWeight.Medium,
             color = MaterialTheme.colorScheme.onBackground
-        )
-        Text(
-            "用眼时长、最长连续用眼与达标率，看清自己的用眼习惯",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
         )
 
         Spacer(Modifier.height(18.dp))
@@ -414,10 +499,20 @@ private fun ReportTab(viewModel: EyeCareViewModel, context: Context) {
 
         // 今日小结（用眼侧）
         TodayWorkSummaryCard(
-            workSeconds = viewModel.todayWorkSeconds,
-            longestStreakSeconds = viewModel.todayLongestStreak,
+            screenOnSeconds = screenOnSeconds,
             restCount = viewModel.todayCount,
-            goalMinutes = viewModel.settings.dailyGoalMinutes
+            goalMinutes = viewModel.settings.dailyGoalMinutes,
+            onRequestScreenTime = if (hasUsageAccess) null else {
+                {
+                    // 跳到系统「使用情况访问」页；回到前台时重查一次授权状态
+                    runCatching {
+                        context.startActivity(
+                            ScreenTimeStore.permissionIntent()
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                    }
+                }
+            }
         )
 
         Spacer(Modifier.height(20.dp))
@@ -432,13 +527,13 @@ private fun ReportTab(viewModel: EyeCareViewModel, context: Context) {
             Spacer(Modifier.height(12.dp))
             Row(modifier = Modifier.fillMaxWidth()) {
                 StatItem(
-                    value = formatDurationShort(totalWork),
-                    label = "用眼总时长",
+                    value = if (hasUsageAccess) formatDurationShort(totalWork) else "--",
+                    label = "亮屏总时长",
                     modifier = Modifier.weight(1f)
                 )
                 StatItem(
-                    value = formatDurationShort(longest),
-                    label = "最长连续",
+                    value = if (hasUsageAccess) formatDurationShort(peakDay) else "--",
+                    label = "单日最多",
                     modifier = Modifier.weight(1f)
                 )
                 StatItem(
@@ -449,7 +544,7 @@ private fun ReportTab(viewModel: EyeCareViewModel, context: Context) {
             }
             Spacer(Modifier.height(14.dp))
             Text(
-                buildReportAdvice(longest, rate, trend, totalWork),
+                buildReportAdvice(peakDay, trend, totalWork),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -460,13 +555,13 @@ private fun ReportTab(viewModel: EyeCareViewModel, context: Context) {
         // 双序列柱状图：用眼（分钟） + 休息（次数）
         SoftCard {
             Text(
-                "每日用眼 / 休息对比",
+                "每日亮屏 / 休息对比",
                 style = MaterialTheme.typography.titleMedium,
                 color = MaterialTheme.colorScheme.onSurface
             )
             Spacer(Modifier.height(6.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
-                LegendDot(color = GrassGreen, text = "用眼(分钟)")
+                LegendDot(color = GrassGreen, text = "亮屏(分钟)")
                 Spacer(Modifier.width(14.dp))
                 LegendDot(color = MistBlue, text = "休息(次)")
             }
@@ -573,25 +668,25 @@ private fun shortDayLabel(dayKey: String): String {
     }
 }
 
-/** 依据数据生成一句轻提示 */
+/**
+ * 依据数据生成一句轻提示（v2.6.16：口径已改为系统亮屏时长）。
+ *
+ * 原来的「单次最长连续用眼」在亮屏口径下没有对应物（亮屏时长不关心连续性），
+ * 改为提示**单日亮屏峰值**；「达标率」原来按自统计的每日用眼目标达成天数算，
+ * 口径与亮屏不一致，一并去掉，只留峰值与环比两条永远可信的。
+ */
 private fun buildReportAdvice(
-    longestStreakSeconds: Int,
-    rate: Float,
+    peakDaySeconds: Int,
     trend: Float,
-    totalWorkSeconds: Int
+    totalScreenOnSeconds: Int
 ): String {
-    if (totalWorkSeconds <= 0) {
-        return "这段时间还没有用眼记录，从今天开始记录吧 🌱"
+    if (totalScreenOnSeconds <= 0) {
+        return "这段时间还没有记录，从今天开始吧 🌱"
     }
     val parts = mutableListOf<String>()
-    val longestMin = longestStreakSeconds / 60
-    if (longestMin >= 45) {
-        parts.add("单次最长连续用眼 ${longestMin} 分钟，建议缩短单次时长")
-    } else if (longestMin > 0) {
-        parts.add("单次最长连续用眼 ${longestMin} 分钟，节奏还不错 👍")
-    }
-    if (rate >= 0f) {
-        parts.add("达标率 ${(rate * 100).toInt()}%")
+    val peakMin = peakDaySeconds / 60
+    if (peakMin > 0) {
+        parts.add("单日亮屏最多 ${peakMin} 分钟")
     }
     if (trend >= 0f) {
         val pct = (trend * 100).toInt()

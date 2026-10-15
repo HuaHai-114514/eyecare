@@ -229,7 +229,12 @@ object StatsStore {
      * @param startWallMs 本段用眼的**起始墙钟时间戳**（毫秒）；
      *                    传 <=0 或省略时退化为「全部记到当前日期」（兼容旧调用）
      */
-    fun addWorkSession(context: Context, workSeconds: Int, startWallMs: Long = -1L) {
+    fun addWorkSession(
+        context: Context,
+        workSeconds: Int,
+        startWallMs: Long = -1L,
+        streakSeconds: Int = -1
+    ) {
         if (workSeconds <= 0) return
         val map = loadAll(context)
         val now = System.currentTimeMillis()
@@ -239,10 +244,18 @@ object StatsStore {
         val validStart = startWallMs > 0L && startWallMs <= now
         val key = if (validStart) dayKeyOf(startWallMs) else dayKeyOf(now)
 
+        // v2.6.12：连续用眼跨度由调用方传入「本段真实跨度」。
+        // 旧实现取 maxOf(cur.longestStreakSeconds, workSeconds)，把每次**增量结算**
+        // 都当成一段独立的连续用眼：同一次连续用眼里每 2 分钟的超时结算、每 5 秒的
+        // 界面 tick 都会被当成新的「最长连续」，于是「最长连续用眼」被严重低估
+        // （真连续 40 分钟，被拆成 20 段 2 分钟 ⇒ 显示 2 分钟）。
+        // 调用方不传（<0）时退回旧语义，保证既有单测与旧调用点行为不变。
+        val streak = if (streakSeconds > 0) streakSeconds else workSeconds
+
         val cur = ensureDay(map, key)
         map[key] = cur.copy(
             workSeconds = cur.workSeconds + workSeconds,
-            longestStreakSeconds = maxOf(cur.longestStreakSeconds, workSeconds)
+            longestStreakSeconds = maxOf(cur.longestStreakSeconds, streak)
         )
         saveAll(context, map)
     }

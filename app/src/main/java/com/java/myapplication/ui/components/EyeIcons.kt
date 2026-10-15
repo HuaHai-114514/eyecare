@@ -229,4 +229,96 @@ object EyeIcons {
             }
         }.build()
     }
+
+    /**
+     * 通过 —— 圆底 + 内嵌对勾（挖空）。
+     *
+     * v2.6.20：自检页原先用 emoji「✅」表示「这一项没问题」。emoji 走系统彩色
+     * 字体，各处字形与基线不一致，与底部导航当初换掉 emoji 是同一个理由。
+     * 改为此图标后颜色交给 tint，可随主题与状态切换。
+     */
+    val CheckCircle: ImageVector by lazy {
+        ImageVector.Builder(
+            name = "EyeCheckCircle",
+            defaultWidth = 24.dp,
+            defaultHeight = 24.dp,
+            viewportWidth = 24f,
+            viewportHeight = 24f
+        ).apply {
+            // 外圆
+            path(fill = SolidColor(Color.Black)) {
+                moveTo(12f, 2f)
+                curveTo(6.48f, 2f, 2f, 6.48f, 2f, 12f)
+                curveToRelative(0f, 5.52f, 4.48f, 10f, 10f, 10f)
+                curveToRelative(5.52f, 0f, 10f, -4.48f, 10f, -10f)
+                curveTo(22f, 6.48f, 17.52f, 2f, 12f, 2f)
+                close()
+                moveTo(12f, 20f)
+                curveToRelative(-4.41f, 0f, -8f, -3.59f, -8f, -8f)
+                curveToRelative(0f, -4.41f, 3.59f, -8f, 8f, -8f)
+                curveToRelative(4.41f, 0f, 8f, 3.59f, 8f, 8f)
+                curveTo(20f, 16.41f, 16.41f, 20f, 12f, 20f)
+                close()
+            }
+            // 内嵌对勾
+            path(fill = SolidColor(Color.Black)) {
+                moveTo(10.2f, 16.4f)
+                lineTo(5.4f, 11.6f)
+                lineTo(6.8f, 10.2f)
+                lineTo(10.2f, 13.6f)
+                lineTo(17.2f, 6.6f)
+                lineTo(18.6f, 8f)
+                close()
+            }
+        }.build()
+    }
+
+    /**
+     * 需注意 —— 圆底 + 内嵌感叹号（挖空）。
+     *
+     * v2.6.20：替换自检页原用的 emoji「⚠️」。
+     * 语义上刻意选圆形而非三角：这里表达的是「有一条待办」，
+     * 不是「危险警告」，圆形与其它通过项保持同一视觉重量。
+     */
+    val AlertCircle: ImageVector by lazy {
+        ImageVector.Builder(
+            name = "EyeAlertCircle",
+            defaultWidth = 24.dp,
+            defaultHeight = 24.dp,
+            viewportWidth = 24f,
+            viewportHeight = 24f
+        ).apply {
+            // 外圆
+            path(fill = SolidColor(Color.Black)) {
+                moveTo(12f, 2f)
+                curveTo(6.48f, 2f, 2f, 6.48f, 2f, 12f)
+                curveToRelative(0f, 5.52f, 4.48f, 10f, 10f, 10f)
+                curveToRelative(5.52f, 0f, 10f, -4.48f, 10f, -10f)
+                curveTo(22f, 6.48f, 17.52f, 2f, 12f, 2f)
+                close()
+                moveTo(12f, 20f)
+                curveToRelative(-4.41f, 0f, -8f, -3.59f, -8f, -8f)
+                curveToRelative(0f, -4.41f, 3.59f, -8f, 8f, -8f)
+                curveToRelative(4.41f, 0f, 8f, 3.59f, 8f, 8f)
+                curveTo(20f, 16.41f, 16.41f, 20f, 12f, 20f)
+                close()
+            }
+            // 感叹号竖条
+            path(fill = SolidColor(Color.Black)) {
+                moveTo(11f, 7f)
+                lineTo(13f, 7f)
+                lineTo(13f, 13f)
+                lineTo(11f, 13f)
+                close()
+            }
+            // 感叹号圆点
+            path(fill = SolidColor(Color.Black)) {
+                moveTo(11f, 15f)
+                lineTo(13f, 15f)
+                lineTo(13f, 17f)
+                lineTo(11f, 17f)
+                close()
+            }
+        }.build()
+    }
 }

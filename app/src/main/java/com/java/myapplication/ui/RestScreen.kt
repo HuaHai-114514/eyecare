@@ -56,6 +56,10 @@ fun RestScreen(viewModel: EyeCareViewModel, context: Context) {
     val cardBodyColor = if (dark) NightTextSecondary else InkGraySecondary
     val ringTrack = if (dark) Color(0x33D9E3DC) else Color(0x1A4CAF7D)
     val buttonBorder = if (dark) NightGreenBright else GrassGreenDeep
+    // v2.6.17：按钮改为绿色实心填充，与设置页开关打开态同一视觉语言。
+    // 填充色用主题主绿（GrassGreen / NightGreen），前景取各自底色上的高对比色。
+    val accentFill = MaterialTheme.colorScheme.primary
+    val accentOnFill = MaterialTheme.colorScheme.onPrimary
 
     val restProgress = if (viewModel.settings.restSeconds <= 0) 1f
     else 1f - viewModel.restRemaining.toFloat() / viewModel.settings.restSeconds
@@ -170,37 +174,48 @@ fun RestScreen(viewModel: EyeCareViewModel, context: Context) {
 
             Spacer(Modifier.height(32.dp))
 
-            // 操作区：想多歇一会儿就点「再休息 30 秒」，休息够了直接继续
+            // 操作区：想多歇一会儿就点「再休息 30 秒」，休息够了直接继续。
+            //
+            // v2.6.17：原实现两个按钮都是 OutlinedButton 且**未加 weight**，
+            // 宽度由文字长度决定（「再休息 30 秒」6 字 /「我已休息好」5 字），
+            // 于是出现「一宽一窄」且整体居中、左右不均衡。现改为各占一半
+            // （weight(1f) + spacing 留白），并统一成绿色填充按钮。
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                OutlinedButton(
+                Button(
                     onClick = { viewModel.extendRest(context, 30) },
                     shape = CircleShape,
-                    border = androidx.compose.foundation.BorderStroke(1.5.dp, buttonBorder),
-                    modifier = Modifier.height(48.dp)
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = accentFill,
+                        contentColor = accentOnFill
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(48.dp)
                 ) {
                     Text(
                         "再休息 30 秒",
-                        color = accentColor,
                         fontWeight = FontWeight.Medium
                     )
                 }
 
-                Spacer(Modifier.width(12.dp))
-
                 // 提前结束按钮
-                OutlinedButton(
+                Button(
                     onClick = { viewModel.skipRest(context) },
                     shape = CircleShape,
-                    border = androidx.compose.foundation.BorderStroke(1.5.dp, buttonBorder),
-                    modifier = Modifier.height(48.dp)
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = accentFill,
+                        contentColor = accentOnFill
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(48.dp)
                 ) {
                     Text(
                         "我已休息好",
-                        color = accentColor,
                         fontWeight = FontWeight.Medium
                     )
                 }

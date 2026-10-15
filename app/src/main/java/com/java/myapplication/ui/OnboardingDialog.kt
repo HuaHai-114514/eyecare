@@ -1,18 +1,22 @@
 package com.java.myapplication.ui
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
+import androidx.compose.material3.Icon
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.java.myapplication.data.AppInfo
+import com.java.myapplication.ui.components.EyeIcons
 import com.java.myapplication.data.Disclaimer
 
 /**
@@ -39,12 +43,24 @@ fun OnboardingDialog(onFinish: () -> Unit) {
         shape = RoundedCornerShape(24.dp),
         title = {
             Column {
-                Text(
-                    if (step == 0) "🌿 欢迎使用护眼时光" else "🔔 让提醒准时到达",
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.Medium,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
+                // v2.6.20：原标题前缀是 emoji「🌿 / 🔔」。这两个 emoji 承担的是
+                // 「现在在第几步」的区分功能，不能只删；改为自绘矢量图标，
+                // 颜色随主题，字面量保留 headlineSmall 的层级。
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = if (step == 0) EyeIcons.CheckCircle else EyeIcons.AlertCircle,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        if (step == 0) "欢迎使用护眼时光" else "让提醒准时到达",
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
                 Spacer(Modifier.height(4.dp))
                 Text(
                     if (step == 0) "开始前，请花一分钟了解下面这些"

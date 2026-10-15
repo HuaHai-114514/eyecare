@@ -15,24 +15,6 @@ import com.java.myapplication.notify.RestSoundPlayer
 import com.java.myapplication.notify.RestVibrator
 import com.java.myapplication.ui.DndWindow
 
-/**
- * 用眼/休息状态机的唯一事实来源。
- *
- * 计时语义（v1.8 · 累计亮屏用眼模型）：
- * 1. 只累计「亮屏使用」的时长：亮屏开始计时，息屏立即暂停累计并撤销到点闹钟
- *    （息屏期间不持有任何唤醒源，零唤醒、最省电）。
- * 2. 短暂息屏（< [LONG_OFF_RESET_MS]）视为「还在用」，回来后续算；
- *    达到 [LONG_OFF_RESET_MS]（1 分钟）的息屏视为「真正离开」，再次亮屏时用眼时长从 0 重新起算，
- *    并且**连同「已到点未休息」的超时态一并作废**（用户诉求：放下手机不该被判超时）。
- * 3. 工作到点只发提醒通知，不自动开始休息；用户点通知的「开始休息」后才起算休息倒计时。
- *
- * 超时语义（v2.4.0，v2.4.3 收紧）：
- * 到点后若用户一直不开始休息，进入「超时用眼」态：
- * - 超时时长**继续累计**并计入用眼统计（不再冻结在到点值）；
- * - 每隔 [AppSettings.overdueRemindMinutes] 分钟重复提醒一次，直到开始休息；
- * - 超时提醒**只在亮屏且持续未休息时**才发；息屏即冻结并撤销超时闹钟，
- *   若息屏达到 [LONG_OFF_RESET_MS] 则亮屏后清空用眼计时与超时态，从 0 重新起算。
- */
 object EyeTimer {
 
     /**
@@ -46,6 +28,30 @@ object EyeTimer {
 
     /** 低于该秒数的用眼片段视为抖动噪声，不计入统计 */
     private const val MIN_RECORD_SECONDS = 5
+
+    /**
+     * 本次进程是否**真的**经历过一次息屏（边沿标记）。
+     *
+     * v2.6.17：仅靠 `offAt`/`screenOnAt` 无法区分「息屏后回来」与「切后台返回」——
+     * 两者都会让 [onScreenOn] 被调用。只有屏幕状态发生 off→on 跃变才算「离开过」。
+     * 本标记在 [onScreenOff] 置位，由 [consumeScreenOnEdge] 消费（读后清零），
+     * 保证一次息屏只对紧接着的那次亮屏生效。
+     */
+    @Volatile
+    private var sawScreenOff = false
+
+    /**
+     * 读取并清除「息屏边沿」标记。
+     *
+     * 必须**先消费再判断**：[onScreenOn] 里有多个提前 return 分支
+     * （`!reminderEnabled`、`phaseResting` 等），若把消费放在后面，
+     * 标记会残留到下一次亮屏，把一次无关的亮屏误判成「前置过息屏」。
+     */
+    private fun consumeScreenOnEdge(): Boolean {
+        val seen = sawScreenOff
+        sawScreenOff = false
+        return seen
+    }
 
     fun isScreenOn(context: Context): Boolean {
         val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -64,23 +70,24 @@ object EyeTimer {
     private fun overdueMs(context: Context): Long =
         SettingsStore.load(context).overdueRemindMinutes * 60 * 1000L
 
-    /** 当前周期已累计的亮屏用眼毫秒 = 已落盘累计 + 本次亮屏已过去时长 */
+    /**
+     * 当前周期已累计的亮屏用眼毫秒 = 已落盘累计 + 本次亮屏已过去时长。
+     *
+     * v2.6.16：用 [isScreenOn] 交叉校验 `screenOnAt`，屏幕实际熄灭时不加墙钟差
+     * —— 否则息屏广播丢失后，整段息屏时间会被算成用眼（统计虚高根因）。
+     */
     fun elapsedMs(context: Context): Long {
         val s = TimerStore.load(context)
-        return if (s.screenOnAt > 0) {
-            s.workAccumMs + (now() - s.screenOnAt).coerceAtLeast(0L)
-        } else {
-            s.workAccumMs
-        }
+        return accumulatedAt(s, now(), isScreenOn(context))
     }
 
-    /** 把「本次亮屏已过去的时间」结算进累计值，并停止累计（进入暂停/冻结态） */
-    private fun frozen(s: TimerState, at: Long): TimerState {
-        val acc = if (s.screenOnAt > 0) {
-            s.workAccumMs + (at - s.screenOnAt).coerceAtLeast(0L)
-        } else {
-            s.workAccumMs
-        }
+    /**
+     * 把「本次亮屏已过去的时间」结算进累计值，并停止累计（进入暂停/冻结态）。
+     *
+     * v2.6.16：[screenActuallyOn] 同 [accumulatedAt]，用于拦截陈旧的 `screenOnAt`。
+     */
+    private fun frozen(s: TimerState, at: Long, screenActuallyOn: Boolean = true): TimerState {
+        val acc = accumulatedAt(s, at, screenActuallyOn)
         return s.copy(workAccumMs = acc, screenOnAt = -1L)
     }
 
@@ -131,7 +138,7 @@ object EyeTimer {
         // 跨天了：先把「段起点 → 今天 0 点」这段的有效用眼结算到起点日。
         // 用比例：有效用眼 = 该墙钟子区间占整段墙钟跨度的比例 × 当前累计。
         val todayStart = dayStartOf(at)
-        val curAccum = accumulatedAt(s, at)
+        val curAccum = accumulatedAt(s, at, isScreenOn(context))
         val fullSpan = (at - segStart).coerceAtLeast(1L)
         val beforeSpan = (todayStart - segStart).coerceIn(0L, fullSpan)
         val beforeMs = (curAccum.toDouble() * (beforeSpan.toDouble() / fullSpan.toDouble())).toLong()
@@ -139,42 +146,103 @@ object EyeTimer {
         // 否则整段会被重复记一次（旧实现的翻倍根因之一）。
         val alreadyRatio = s.recordedAccumMs.toDouble().coerceIn(0.0, curAccum.toDouble()) *
             (beforeSpan.toDouble() / fullSpan.toDouble())
-        val beforeSec = ((beforeMs - alreadyRatio.toLong()).coerceAtLeast(0L) / 1000L).toInt()
-        if (beforeSec >= MIN_RECORD_SECONDS) {
-            // 归属起点日：整段（0 点前的这一截）记到昨天
-            StatsStore.addWorkSession(context, beforeSec, startWallMs = segStart)
-        }
+        // v2.6.17：自统计已废止，跨天不再需要往昨天补记一笔。
+        // 保留下面的「归零并从今天 0 点重新起算」——计时器本身仍要跨天归零。
 
         // 归零并从「今天 0 点」重新起算：
         // - workAccumMs 只保留 0 点之后到 at 的用量（即 curAccum - beforeMs）
-        // - screenOnAt 若之前 >0（正在累计）则保持「正在累计」：设为 at
+        // - screenOnAt 保持「正在累计」当且仅当**此刻屏幕真的亮着**
         // - 段起点重置为「今天 0 点」
         val afterMs = (curAccum - beforeMs).coerceAtLeast(0L)
-        // 新一段（0 点之后）尚未结算，recordedAccumMs 与 workAccumMs 同步归零。
+        // ⚠️ v2.6.18 回归修复：这里原为 `if (s.screenOnAt > 0) at else -1L`，
+        // 只看持久化字段、不校验屏幕实况，是「次日首次亮屏弹超时 500+ 分钟」的根因。
+        //
+        // 事故链（实测日志 segStart=当天0点 onAt=前一天亮屏时刻）：
+        //  1. 前一天最后一次亮屏结束后 `frozen()` 已把 `screenOnAt` 落盘为 -1，
+        //     但跨天检测走的是 `clockTick` 每秒路径，它读到的 `s` 可能来自
+        //     「屏幕刚灭、而某个中间态把 screenOnAt 又写回正数」的时刻；
+        //  2. 跨天时该分支把陈旧的 `screenOnAt` 直接改写成 `at`（数小时后的凌晨），
+        //     于是新段看起来「从凌晨就开始累计」；
+        //  3. 清晨用户首次亮屏，`accumulatedAt` 的 `screenActuallyOn = isScreenOn()`
+        //     此刻为 true，于是全量采信 `at - screenOnAt` —— 把**整夜**算成用眼，
+        //     连带 `onWorkDeadline` 反复判定「已到点」并弹超时提醒。
+        //
+        // 修法与 [accumulatedAt] 的 v2.6.16 修复同源：**累计入口必须用真实屏幕状态
+        // 交叉验证**，字段值本身不足以证明「正在累计」。屏幕此刻是灭的，新段一律
+        // 以「未在累计」起步（screenOnAt = -1）；屏幕真的亮着才继续累计。
+        val screenActuallyOn = isScreenOn(context)
+        // 新一段（0 点之后）尚未结算，recordedAccumMs 与 workAccumMs 同步归零，
+        // 并把段序号 +1 —— 否则新一天的段与昨天的段序号相同，
+        // recordWorkSession 会拿昨天的基准去比今天的累计（少记或重记）。
         return s.copy(
             workAccumMs = afterMs,
-            screenOnAt = if (s.screenOnAt > 0) at else -1L,
+            screenOnAt = if (screenActuallyOn) at else -1L,
             accumStartWallMs = todayStart,
-            recordedAccumMs = 0L
+            recordedAccumMs = 0L,
+            accumGeneration = s.accumGeneration + 1L,
+            recordedGeneration = s.accumGeneration + 1L
         )
     }
 
     private fun recordWorkSession(context: Context, state: TimerState): TimerState {
         val accum = state.workAccumMs
-        // 基准高于当前累计 ⇒ 累计被重置过（已开启新一段），视为本段尚未结算；
-        // 否则新一段会被旧基准「压住」而永远记不进统计（自愈兜底）。
-        val already = if (state.recordedAccumMs > accum) 0L
-        else state.recordedAccumMs.coerceAtLeast(0L)
+        // v2.6.12：基准只在「同一段」内才可信，用段序号严格判定。
+        // 旧实现靠 `recordedAccumMs > accum` 事后猜段，但 `resync` 亮屏分支与
+        // `onScreenOn` 短暂息屏续算分支只归零了 workAccumMs 而漏了 recordedAccumMs，
+        // 于是新段被旧基准压住 → 增量恒为 0（漏记）或整段重记（虚高 12 倍）。
+        // 现在基准带上它所属的段序号：只有序号一致才认旧基准，否则本段全额入账。
+        val sameSegment = state.recordedGeneration == state.accumGeneration
+        val already = if (sameSegment) state.recordedAccumMs.coerceIn(0L, accum) else 0L
         val deltaSec = ((accum - already) / 1000L).toInt()
+        // v2.6.12：真实「连续用眼」跨度由本段墙钟跨度反推（见 realStreakSeconds）。
+        val streakSec = realStreakSeconds(state, accum)
+        // v2.6.14（临时诊断）：把每一次结算的算式落盘，用于定位重复入账。
         if (deltaSec < MIN_RECORD_SECONDS) {
             // 增量不足 5 秒：不写统计，但把基准抬到当前累计值，
             // 避免这些零头在后续出口被反复凑成一段重复计入。
-            return state.copy(recordedAccumMs = accum)
+            return state.copy(recordedAccumMs = accum, recordedGeneration = state.accumGeneration)
         }
-        // v2.4.x：带本段累计的墙钟起点，让跨 0 点的时长能按天切分到各自日期。
-        // 起点未知(-1)时传入 -1，StatsStore 会退化为「全部记到当天」（兼容旧数据）。
-        StatsStore.addWorkSession(context, deltaSec, startWallMs = state.accumStartWallMs)
-        return state.copy(recordedAccumMs = accum)
+        // v2.6.17：这里原本调用 StatsStore.addWorkSession 把增量写进自统计。
+        // 自统计已废止，不再有任何一笔写盘 —— 本函数退化为纯粹的
+        // 「把已结算水位线抬到当前累计」的状态推进。
+        return state.copy(recordedAccumMs = accum, recordedGeneration = state.accumGeneration)
+    }
+
+    /**
+     * v2.6.12：开启新一段累计。
+     *
+     * `recordedAccumMs` 与 `recordedGeneration` 同步重置 —— 这样
+     * [recordWorkSession] 永远不会把上一段的基准套到新段上（虚高根因）。
+     */
+    private fun TimerState.newSegment(
+        at: Long,
+        screenOn: Boolean
+    ): TimerState = newSegment(at, screenOn, "?")
+
+    private fun TimerState.newSegment(
+        at: Long,
+        screenOn: Boolean,
+        trace: String
+    ): TimerState = copy(
+        workAccumMs = 0L,
+        recordedAccumMs = 0L,
+        accumGeneration = accumGeneration + 1L,
+        recordedGeneration = accumGeneration + 1L,
+        accumStartWallMs = if (screenOn) at else -1L,
+        screenOnAt = if (screenOn) at else -1L,
+        offAt = if (screenOn) -1L else at
+    )
+
+    /**
+     * v2.6.12：真实「连续用眼」时长（秒）。
+     *
+     */
+    internal fun realStreakSeconds(state: TimerState, accumMs: Long, at: Long = now()): Int {
+        val start = state.accumStartWallMs
+        if (start <= 0L) return (accumMs / 1000L).toInt()
+        val wallSpan = (at - start).coerceAtLeast(0L)
+        val span = maxOf(wallSpan, accumMs)
+        return (span / 1000L).toInt()
     }
 
     /**
@@ -186,22 +254,38 @@ object EyeTimer {
      */
     private fun recordOverdue(context: Context, s: TimerState, at: Long): Long {
         if (!s.overdueCounting) return s.recordedAccumMs
-        val curAccum = accumulatedAt(s, at)
-        val deltaSec = overdueDeltaSeconds(curAccum, workMs(context), s.overdueRecordedMs)
-        if (deltaSec < MIN_RECORD_SECONDS) return s.recordedAccumMs
-        // 超时段的墙钟起点：上回到点时刻（screenOnAt，到点时被重置为到点时刻），
-        // 若未知则用本段累计起点兜底。
-        val overdueStart = if (s.screenOnAt > 0) s.screenOnAt else s.accumStartWallMs
-        StatsStore.addWorkSession(context, deltaSec, startWallMs = overdueStart)
-        // v2.4.4：超时段已入账，把「已结算基准」抬到当前累计值。
-        // 否则它会在后续出口（休息结束 / 稍后再说 / 息屏）被 recordWorkSession
-        // 以 `workAccumMs - recordedAccumMs` 再记一遍 —— 这是时长翻倍的根因之一。
+        val curAccum = accumulatedAt(s, at, isScreenOn(context))
+        // v2.6.15：超时段**不再单独入账**。
+        // recordWorkSession 的 `accum - already` 已覆盖到点后的全部时长，
+        // 这里再按 `curAccum - workMs - overdueRecordedMs` 记一次就是纯重复。
+        // 本函数保留，用于推进 overdueRecordedMs 水位线（决定超时提醒是否该响）
+        // 并把当前累计返回给调用方。
         return curAccum
     }
 
-    /** 把「已落盘累计 + 本次亮屏已过去时长」算成当前总累计毫秒（纯函数，便于测试） */
-    internal fun accumulatedAt(s: TimerState, at: Long): Long =
-        if (s.screenOnAt > 0) {
+    /**
+     * 把一段「已冻结的累计」按同一段基准结算入统计。
+     *
+     * v2.6.13：`recordWorkSession` 的 `already` 取值要求**同一段**且
+     * `recordedAccumMs` 与传入的 `workAccumMs` 口径一致。各出口在冻结累计后
+     * 常常紧接着又调用了 `recordOverdue`（它返回的 `curAccum` 是**含超时**的总量），
+     * 于是 `recordedAccumMs` 被抬到「含超时值」、而 `workAccumMs` 仍是冻结值，
+     * 两者口径再次错位。
+     *
+     * 因此这里统一收口：先按冻结累计结算，再把超时增量单独结算，
+     * 最后把基准显式对齐到「冻结累计」，保证任何出口都不会重复入账。
+     */
+    /**
+     * 把「已落盘累计 + 本次亮屏已过去时长」算成当前总累计毫秒（纯函数，便于测试）。
+     *
+     * v2.6.16：新增 [screenActuallyOn] 交叉校验。`screenOnAt` 是「进程内事件推断值」，
+     * 一旦息屏广播丢失（进程被杀、广播被系统丢弃），它会停留在一个陈旧的亮屏时刻，
+     * 而 `at - screenOnAt` 就把整段息屏时间算成用眼（实测虚高 20 分钟）。
+     * 因此调用方应传入由 `PowerManager.isInteractive` 得到的真实屏幕状态；
+     * 屏幕实际是灭的时一律按「未在累计」处理。
+     */
+    internal fun accumulatedAt(s: TimerState, at: Long, screenActuallyOn: Boolean = true): Long =
+        if (s.screenOnAt > 0 && screenActuallyOn) {
             s.workAccumMs + (at - s.screenOnAt).coerceAtLeast(0L)
         } else {
             s.workAccumMs
@@ -227,7 +311,7 @@ object EyeTimer {
 
     /** 计算到 [at] 为止、已经结算并写入统计的超时毫秒数（用于去重落盘） */
     private fun overdueRecordedAfter(context: Context, s: TimerState, at: Long): Long {
-        val curAccum = accumulatedAt(s, at)
+        val curAccum = accumulatedAt(s, at, isScreenOn(context))
         return (curAccum - workMs(context)).coerceAtLeast(0L)
     }
 
@@ -247,6 +331,11 @@ object EyeTimer {
      *   并作废「到点未休息」的超时态；短于阈值则续算剩余时间。
      */
     fun onScreenOn(context: Context) {
+        // v2.6.17：**先消费边沿标记**，再做任何可能提前 return 的判断。
+        // 否则 `!reminderEnabled` / `phaseResting` 的提前返回会让标记残留到
+        // 下一次调用，把一次无关的亮屏误判成「前置过息屏」。
+        // 消费后的值以局部变量贯穿本函数，语义清晰且不受后续分支影响。
+        val cameFromScreenOff = consumeScreenOnEdge()
         var s = TimerStore.load(context)
         if (!s.reminderEnabled) return
         if (s.phaseResting) return
@@ -264,11 +353,110 @@ object EyeTimer {
                 // 清空用眼计时与超时态，亮屏后从 0 安静重新起算（不再弹超时）。
                 resetToFreshCycle(context, t)
             } else {
-                // 短暂息屏后回来仍未休息：恢复超时累计并重排超时提醒（v2.4.0）
-                val resumed = if (s.screenOnAt > 0) s else s.copy(screenOnAt = t)
-                TimerStore.save(context, resumed.copy(offAt = -1L, overdueCounting = true))
-                AlarmScheduler.scheduleOverdueReminder(context, t + overdueMs(context))
+                // 短暂息屏后回来：**不再恢复超时态、不再重排超时闹钟**。
+                // v2.6.12 修复：原实现把 offAt 抹成 -1 并重排超时闹钟，而
+                // ACTION_SCREEN_ON / ACTION_USER_PRESENT 是两次独立广播 →
+                // 第二次进来 leftLong 因 offAt == -1 恒为 false，又走一遍 else
+                // 再排一次闹钟，于是亮屏后不久就误弹「超时未休息」。
+                // 现在只恢复累计、清掉超时标记，等用户真正继续用眼到点后重新提醒。
+                // ⚠️ v2.6.18 回归修复：`screenOnAt` 不得无条件继承。
+                //
+                // 原为 `if (s.screenOnAt > 0) s.screenOnAt else t`，只看字段不看
+                // 屏幕实况 —— 与 [rollOverIfDayChanged] 是同一类缺陷的两个表现，
+                // 同样导致「次日首次亮屏弹超时 500+ 分钟」以及提醒反复触发：
+                //  1. 息屏期间 frozen() 已把 screenOnAt 落盘为 -1，但短暂息屏
+                //     （未达 leftLong 阈值）走本分支时，若字段恰为陈旧正数，
+                //     就被原样保留 —— 而它指向的是**几小时前的旧亮屏时刻**；
+                //  2. 紧接着 `elapsedMs(context)` 重新读盘，此时 isScreenOn() 为 true，
+                //     `accumulatedAt` 全量采信 `t - screenOnAt` → 算出数小时「用眼」；
+                //  3. `elapsed >= workMs` 恒真 → 每次亮屏都调 onWorkDeadline，
+                //     实测同一分钟内刷了 19 次 DEADLINE。
+                //
+                // 正确语义：这里的 `screenOnAt` 是「本段累计起点」，只有在**本段仍在
+                // 累计中**（字段有效）且**屏幕此刻真的亮着**时才可延续；否则必须
+                // 以当前时刻 t 重新起算，绝不能把陈旧跨度接进新段。
+                val screenActuallyOn = isScreenOn(context)
+                TimerStore.save(
+                    context,
+                    s.copy(
+                        screenOnAt = if (screenActuallyOn && s.screenOnAt > 0) s.screenOnAt else t,
+                        offAt = -1L,
+                        awaitingRest = false,
+                        overdueCounting = false,
+                        overdueRecordedMs = 0L
+                    )
+                )
+                AlarmScheduler.cancelOverdueReminder(context)
+                RestNotifier.cancelReminder(context)
+                RestOverlayService.stop(context)
+                val workMs = workMs(context)
+                // v2.6.18：elapsed 改为基于**刚落盘的状态**计算，不再重新读盘 ——
+                // 重新读盘会拿到与上面判据不同的快照（正是重复触发的成因之一）。
+                // v2.6.17 已在 [onWorkDeadline] 内做过同样的「快照一致性」修复。
+                val justSaved = TimerStore.load(context)
+                val elapsed = accumulatedAt(justSaved, t, screenActuallyOn)
+                if (elapsed >= workMs) {
+                    onWorkDeadline(context, notify = true)
+                } else {
+                    AlarmScheduler.scheduleWorkDeadline(context, t + (workMs - elapsed))
+                }
             }
+            return
+        }
+
+        // v2.6.17：**先判「是否真正离开过」，再做其它一切分支**。
+        //
+        // 这是「熄屏一段时间后亮屏应从 0 重新计时」失效的根因。原实现把
+        // 「已到点却还没提醒 → 立刻补提醒」的兜底放在 leftLong 判定之前，
+        // 于是：息屏前刚好累计到点 → 息屏一小时后亮屏 → elapsed 仍 >= workMs
+        // → 直接走 onWorkDeadline 弹提醒并 return，下面「真正离开过 → 新段归零」
+        // 的分支永远没机会执行。
+        //
+        // 后果有两个，都是同一个根因：
+        //   1. 亮屏瞬间误弹「到点请休息」/「超时 N 分钟」；
+        //   2. onWorkDeadline 会把 screenOnAt 改写为亮屏时刻、却保留息屏前的
+        //      workAccumMs，下次结算 accumulatedAt 就把中间的息屏跨度算成用眼，
+        //      即统计虚高。
+        //
+        // 正确顺序：离开过 → 直接开新段（归零、+1 代际、清超时态），结束。
+        //
+        // ⚠️ v2.6.17 回归修复：「离开过」必须限定在**本次亮屏确实来自一次息屏**。
+        //
+        // 判据演进（两步都踩过坑）：
+        //  - 只看 `leftLong = t - offAt >= 阈值`：`offAt` 是上次真正息屏的时间戳，
+        //    切后台并不更新它 → 只要上次息屏距今超过阈值，之后**每次**切回前台
+        //    （onForeground → syncScreenState → onScreenOn）都误判「离开过」而归零。
+        //  - 再补 `screenOnAt <= 0`：无效。`frozen()` 每次冻结都会把 `screenOnAt`
+        //    写成 -1 并落盘，所以「真正息屏过一次」之后它**长期就是 -1**，
+        //    该前提形同不存在，回归照旧。
+        //
+        // 唯一可靠的区分是**边沿**：真正的「息屏→亮屏」会让屏幕状态发生
+        // off→on 跃变；而切后台返回时屏幕全程是亮的，状态并未变化。
+        // 因此这里要求 `consumeScreenOnEdge()` 为真 —— 只有跨过一次真实息屏
+        // 的调用才有资格进入归零判定。
+        // 「离开过」的判据：必须同时满足
+        //   leftLong           —— 本次息屏时长达到阈值；
+        //   cameFromScreenOff  —— 确实发生过「息屏→亮屏」跃变（排除切后台返回）。
+        val leftThisScreen = leftLong && cameFromScreenOff
+
+        // 「从未起算过」的兜底。
+        //
+        // ⚠️ v2.6.17 回归修复：原来条件是 `s.workAccumMs <= 0L`，而本函数会被
+        // **重复调用**（MainActivity.onResume → onForeground → syncScreenState
+        // → onScreenOn），于是形成自维持的死循环：
+        //   newSegment 把 workAccumMs 清 0 且 screenOnAt 置为有效 →
+        //   下次调用读到 workAccumMs == 0 → 又命中 <= 0 → 再归零一次……
+        // 表现就是「每次切后台回来都从零重新计时」，且段序号 gen 一路疯涨
+        // （实测 79 → 84 → 85）。日志铁证：leftLong=false、edge=false 两个
+        // 判据都为假，却仍然走进了归零分支，唯一为真的就是这个兜底。
+        //
+        // 正确语义：「没有进行中的段」才需要兜底起算。`screenOnAt > 0` 表示
+        // 当前段正在累计中，即便累计恰好是 0（刚开始、或刚归零过）也属于
+        // 「已有段」，不得重复开新段。
+        val noActiveSegment = s.screenOnAt <= 0 && s.workAccumMs <= 0L
+
+        if (leftThisScreen || noActiveSegment) {
+            resetToFreshCycle(context, t)
             return
         }
 
@@ -287,14 +475,21 @@ object EyeTimer {
             return
         }
 
-        if (leftLong || s.workAccumMs <= 0L) {
-            // 真正离开过：从 0 起算（新段起点 = 本次亮屏时刻）
-            TimerStore.save(context, s.copy(workAccumMs = 0L, screenOnAt = t, offAt = -1L,
-                accumStartWallMs = t, recordedAccumMs = 0L))
-            AlarmScheduler.scheduleWorkDeadline(context, t + workMs)
-        } else {
-            // 短暂息屏：续算剩余时间
-            TimerStore.save(context, s.copy(screenOnAt = t, offAt = -1L))
+        run {
+            // 短暂息屏：续算剩余时间。
+            // v2.6.13：续算时**不能**把「息屏前的累计」当成同一段已结算值 ——
+            // 息屏那一刻的累计已经冻结在 workAccumMs 里，而 recordedAccumMs 可能
+            // 落后（上一段遗留）或超前。这里显式声明「息屏前的累计已结算」，
+            // 并把段落基准（起点/序号）对齐，避免续算段被整段重记。
+            TimerStore.save(
+                context,
+                s.copy(
+                    screenOnAt = t,
+                    offAt = -1L,
+                    recordedAccumMs = s.workAccumMs,
+                    recordedGeneration = s.accumGeneration
+                )
+            )
             AlarmScheduler.scheduleWorkDeadline(context, t + (workMs - s.workAccumMs))
         }
     }
@@ -307,16 +502,18 @@ object EyeTimer {
      * 会撤销到点 / 超时闹钟，并按需重排新的到点闹钟（由调用方屏幕状态决定）。
      */
     private fun resetToFreshCycle(context: Context, t: Long) {
+        // v2.6.12：也要开新段（段序号 +1、基准归零），否则上一段的
+        // recordedAccumMs 会在新段里被当成「已结算」而把新段整段漏记。
+        val prev = TimerStore.load(context)
+        // v2.6.17（临时诊断）：归零是统计/计时异常的核心动作，标出调用来源。
         TimerStore.save(
             context,
-            TimerState(
+            prev.newSegment(at = t, screenOn = true).copy(
                 reminderEnabled = true,
                 phaseResting = false,
                 awaitingRest = false,
-                workAccumMs = 0L,
-                screenOnAt = t,
-                offAt = -1L,
-                accumStartWallMs = t
+                overdueCounting = false,
+                overdueRecordedMs = 0L
             )
         )
         AlarmScheduler.cancelOverdueReminder(context)
@@ -333,6 +530,8 @@ object EyeTimer {
      * 息屏时长决定「续算」还是「清零重算」，从根本上杜绝息屏后亮屏误弹超时。
      */
     fun onScreenOff(context: Context) {
+        // 记录真实息屏边沿：后续 onScreenOn 可据此区分「真的离开过」与「切后台返回」
+        sawScreenOff = true
         val s = TimerStore.load(context)
         if (!s.reminderEnabled) {
             AlarmScheduler.cancelAll(context)
@@ -345,8 +544,22 @@ object EyeTimer {
         // 息屏时若已累计出可观用眼时长，视为本次用眼周期结束，结算入统计。
         // v2.4.4：recordWorkSession 现在会落盘（含 offAt），故改为互斥分支，
         // 避免先前写入的 offAt 被随后落盘的旧 offAt 覆盖（会让「息屏时长」判定失真）。
+        //
+        // ⚠️ v2.6.19 回归修复（「熄屏后亮屏不重置」的真正根因）：
+        // 上面这条注释里的「recordWorkSession 现在会落盘」**在 v2.6.17 之后不再成立** ——
+        // 自统计废止时该函数被改成纯状态推进，只 `return state.copy(...)`，
+        // **内部不再调用 TimerStore.save()**。于是本分支（最常走的一条）的返回值
+        // 被直接丢弃，`offAt = t` 从未持久化：
+        //   磁盘 offAt 恒为 -1 → 亮屏时 `leftLong = offAt > 0 && ...` 恒假
+        //   → 判不出「离开过」→ 长息屏后亮屏不归零。
+        // 当时现象：息屏那一刻算出的 offAt 在数分钟后读回仍是 -1，
+        // 即「算得对，但从未落盘」。
+        // 修法：显式落盘，不再依赖被调用方的副作用。
         if (!s.phaseResting && !s.awaitingRest) {
-            recordWorkSession(context, f.copy(offAt = t))
+            val settled = recordWorkSession(context, f.copy(offAt = t))
+            // `recordWorkSession` 可能早退（增量不足 5 秒）而返回**未带 offAt** 的 state，
+            // 故在此强制带上本次息屏时刻，确保无论走哪条 return 都能记住「何时离开」。
+            TimerStore.save(context, settled.copy(offAt = t))
         } else {
             TimerStore.save(context, f.copy(offAt = t))
         }
@@ -361,11 +574,23 @@ object EyeTimer {
         // 也不再重复提醒）；是否作废该状态交由亮屏时按息屏时长判定：
         // 短息屏（< 阈值）续算剩余时间，长息屏清零重算并作废超时态。
         if (s.awaitingRest) {
+            // v2.6.12：息屏即作废「到点未休息」超时态（不再等亮屏按息屏时长判定）。
+            // 先把超时时长结算入统计，再清掉 awaitingRest / overdueCounting，
+            // 从根本上杜绝「息屏→亮屏」误弹超时提醒。
             val mark = recordOverdue(context, s, t)
-            TimerStore.save(context, f.copy(offAt = t, overdueCounting = false,
-                overdueRecordedMs = overdueRecordedAfter(context, s, t),
-                recordedAccumMs = mark))
+            TimerStore.save(
+                context,
+                f.copy(
+                    offAt = t,
+                    awaitingRest = false,
+                    overdueCounting = false,
+                    overdueRecordedMs = overdueRecordedAfter(context, s, t),
+                    recordedAccumMs = mark
+                )
+            )
             AlarmScheduler.cancelOverdueReminder(context)
+            RestNotifier.cancelReminder(context)
+            RestOverlayService.stop(context)
             return
         }
 
@@ -378,7 +603,13 @@ object EyeTimer {
 
     /** 进程启动时同步一次真实屏幕状态（挂在 Application.onCreate） */
     fun syncScreenState(context: Context) {
-        if (isScreenOn(context)) onScreenOn(context) else onScreenOff(context)
+        if (isScreenOn(context)) {
+            onScreenOn(context)
+        } else {
+            // 进程可能在息屏期间被杀，启动时直接观察到「屏幕是灭的」——
+            // 这同样是一次有效息屏边沿，必须置位，否则随后亮屏会漏掉归零判定。
+            onScreenOff(context)
+        }
     }
 
     // ==================== 到点提醒 / 休息 ====================
@@ -397,7 +628,11 @@ object EyeTimer {
 
         val t = now()
         val workMs = workMs(context)
-        val elapsed = elapsedMs(context)
+        // v2.6.17：`elapsed` 必须由**本函数已持有的 s** 算出，不能再调 elapsedMs()
+        // 重新 load 一次 —— 两次读取之间状态可能已被其它出口改写（息屏广播、
+        // resync 亮屏、闹钟并发），判据与随后结算用的累计就会来自不同的快照，
+        // 正是「亮屏瞬间误判已到点」的来源。
+        val elapsed = accumulatedAt(s, t, isScreenOn(context))
 
         if (elapsed < workMs) {
             // 提前触发（如兜底闹钟）：重排到真正到点
@@ -406,7 +641,9 @@ object EyeTimer {
         }
         if (!isScreenOn(context)) {
             // 息屏：冻结累计，等下次亮屏重算
-            TimerStore.save(context, frozen(s, t).copy(offAt = t))
+            // v2.6.16：此处由闹钟触发，屏幕已灭，screenOnAt 可能已陈旧，
+            // 明确告知「屏幕不在亮」以免把息屏时段计入用眼。
+            TimerStore.save(context, frozen(s, t, screenActuallyOn = false).copy(offAt = t))
             AlarmScheduler.cancelWorkAlarm(context)
             return
         }
@@ -418,9 +655,15 @@ object EyeTimer {
         // 跨天时能正确归属到昨天），再把段起点重置为 t 起算超时段。
         // v2.4.4：recordWorkSession 会把 recordedAccumMs 抬到 workMs，
         // 因此这一步必须**先于**下面 deadlineState 的落盘，避免被覆盖。
-        val settled = recordWorkSession(context, s.copy(workAccumMs = workMs))
+        // v2.6.15：到点结算必须用**当前真实累计**（含已走过的超时零头），
+        // 而不是把 workAccumMs 压回 workMs。旧实现先在 recordWorkSession 里
+        // 把基准抬到 1200s，随后又把 workAccumMs 压回 1200s 并把
+        // accumStartWallMs 重置为 t —— 于是「超时段」与「到点前段」在基准上
+        // 打架：下一段从 0 长到 1200s 时会被整段再记一遍（统计虚高根因）。
+        val curAccum = accumulatedAt(s, t, isScreenOn(context))
+        val settled = recordWorkSession(context, s.copy(workAccumMs = curAccum))
         val deadlineState = settled.copy(
-            workAccumMs = workMs,
+            workAccumMs = curAccum,
             screenOnAt = t,
             offAt = -1L,
             awaitingRest = true,
@@ -479,7 +722,8 @@ object EyeTimer {
         val t = now()
         // 息屏了：冻结并撤销超时闹钟，不打扰
         if (!isScreenOn(context)) {
-            val f = frozen(s, t)
+            // v2.6.16：闹钟触发路径，屏幕已灭，按「不在亮」处理。
+            val f = frozen(s, t, screenActuallyOn = false)
             recordOverdue(context, s, t)
             TimerStore.save(context, f.copy(offAt = t, overdueCounting = false,
                 overdueRecordedMs = overdueRecordedAfter(context, s, t)))
@@ -511,11 +755,16 @@ object EyeTimer {
         // 跨天：开始休息前先归零（避免昨天那段随休息一并结算到新的一天）
         s = rollOverIfDayChanged(context, s, now()).also { if (it !== s) TimerStore.save(context, it) }
         val t = now()
-        // 超时态下开始休息：先把未结算的超时时长计入统计，再清标记
+        // v2.6.13：先冻结累计并结算「到点前那一段」，再单独结算超时增量。
+        // 原实现只调 recordOverdue（它按 `curAccum - workMs` 算增量、
+        // 并把基准抬到**含超时**的 curAccum），一旦到点后 user 又用了一段时间，
+        // 超时增量与冻结累计的口径就会错位，后续出口会把差额再记一遍。
+        val frozenState = frozen(s, t)
+        recordWorkSession(context, frozenState)
         recordOverdue(context, s, t)
         TimerStore.save(
             context,
-            frozen(s, t).copy(
+            frozenState.copy(
                 phaseResting = true,
                 restStart = t,
                 awaitingRest = false,
@@ -603,7 +852,9 @@ object EyeTimer {
         RestNotifier.cancelReminder(context)
         val t = now()
         val screenOn = isScreenOn(context)
-        recordWorkSession(context, frozen(s, t))
+        // v2.6.13：先结算到点前的累计，再单算超时增量（口径互不覆盖）。
+        val fr = frozen(s, t)
+        recordWorkSession(context, fr)
         recordOverdue(context, s, t)
         TimerStore.save(
             context,
@@ -613,12 +864,7 @@ object EyeTimer {
                 awaitingRest = false,
                 overdueCounting = false,
                 overdueRecordedMs = 0L,
-                workAccumMs = 0L,
-                recordedAccumMs = 0L,
-                screenOnAt = if (screenOn) t else -1L,
-                offAt = if (screenOn) -1L else t,
-                accumStartWallMs = if (screenOn) t else -1L
-            )
+            ).newSegment(at = t, screenOn = screenOn)
         )
         AlarmScheduler.cancelOverdueReminder(context)
         // 稍后再说 / 忽略：若正盖着后台全屏，一并收起
@@ -638,7 +884,9 @@ object EyeTimer {
     private fun endRestPhase(context: Context, state: TimerState) {
         val t = now()
         val screenOn = isScreenOn(context)
-        recordWorkSession(context, frozen(state, t))
+        // v2.6.16：休息结束时屏幕可能已经熄灭，用真实屏幕状态判定，
+        // 否则会把休息期间的墙钟跨度算成新一段的用眼。
+        recordWorkSession(context, frozen(state, t, screenActuallyOn = screenOn))
         TimerStore.save(
             context,
             state.copy(
@@ -647,12 +895,7 @@ object EyeTimer {
                 awaitingRest = false,
                 overdueCounting = false,
                 overdueRecordedMs = 0L,
-                workAccumMs = 0L,
-                recordedAccumMs = 0L,
-                screenOnAt = if (screenOn) t else -1L,
-                offAt = if (screenOn) -1L else t,
-                accumStartWallMs = if (screenOn) t else -1L
-            )
+            ).newSegment(at = t, screenOn = screenOn)
         )
         AlarmScheduler.cancelRestAlarm(context)
         AlarmScheduler.cancelOverdueReminder(context)
@@ -682,11 +925,7 @@ object EyeTimer {
                     awaitingRest = false,
                     overdueCounting = false,
                     overdueRecordedMs = 0L,
-                    workAccumMs = 0L,
-                    screenOnAt = if (screenOn) t else -1L,
-                    offAt = if (screenOn) -1L else t,
-                    accumStartWallMs = if (screenOn) t else -1L
-                )
+                ).newSegment(at = t, screenOn = screenOn)
             )
             if (screenOn) {
                 AlarmScheduler.scheduleWorkDeadline(context, t + workMs(context))
@@ -766,7 +1005,8 @@ object EyeTimer {
 
         if (!screenOn) {
             // 息屏：冻结累计并撤销唤醒源
-            val f = frozen(s, t).copy(offAt = t)
+            // v2.6.16：明确传入「屏幕不亮」，拦截陈旧的 screenOnAt。
+            val f = frozen(s, t, screenActuallyOn = false).copy(offAt = t)
             TimerStore.save(context, f)
             AlarmScheduler.cancelWorkAlarm(context)
             val remaining = workMs - f.workAccumMs
@@ -778,12 +1018,24 @@ object EyeTimer {
         if (s.screenOnAt <= 0) {
             val leftLong = s.offAt > 0 && t - s.offAt >= LONG_OFF_RESET_MS
             if (leftLong || s.workAccumMs <= 0L) {
-                TimerStore.save(context, s.copy(workAccumMs = 0L, screenOnAt = t, offAt = -1L,
-                    accumStartWallMs = t))
+                // v2.6.17：新段起点必须用「此刻」，否则下面 scheduleWorkDeadline
+                // 用的是 t + workMs（此刻 + 目标），而新段屏幕起点若沿用旧值，
+                // 下一次到点结算就会把中间的息屏跨度算成用眼。
+                TimerStore.save(context, s.newSegment(at = t, screenOn = true))
                 AlarmScheduler.scheduleWorkDeadline(context, t + workMs)
                 return
             }
-            TimerStore.save(context, s.copy(screenOnAt = t, offAt = -1L))
+            // v2.6.13：与 onScreenOn 一致 —— 续算前把已结算基准对齐到冻结累计，
+            // 否则旧基准会在续算段里再记一遍（统计虚高根因）。
+            TimerStore.save(
+                context,
+                s.copy(
+                    screenOnAt = t,
+                    offAt = -1L,
+                    recordedAccumMs = s.workAccumMs,
+                    recordedGeneration = s.accumGeneration
+                )
+            )
         }
 
         val elapsed = elapsedMs(context)

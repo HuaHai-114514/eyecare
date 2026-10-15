@@ -25,6 +25,11 @@
     <uses-permission
         android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"
         tools:targetApi="34" />
+    <!-- 读取系统亮屏时长（v2.6.12）：统计页用作「用眼时长」的对照值。
+         需用户在系统设置里授予「使用情况访问权限」，未授权时页面自动隐藏该项。 -->
+    <uses-permission
+        android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
 
     <application
         android:name=".EyeCareApplication"

@@ -17,6 +17,7 @@ import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
@@ -36,6 +37,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.java.myapplication.ui.components.EyeIcons
 import com.java.myapplication.data.EyeTip
 import com.java.myapplication.data.EyeTips
 import com.java.myapplication.ui.theme.*
@@ -168,7 +170,7 @@ fun TipCarousel(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                "💡 护眼小知识",
+                "护眼小知识",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.primary,
                 fontWeight = FontWeight.Medium,
@@ -263,32 +265,60 @@ fun TipCarousel(
 
         Spacer(Modifier.height(12.dp))
 
-        // 页码指示器（宽度平滑过渡，不再跳变）
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.Center
-        ) {
-            repeat(tips.size) { i ->
-                val active = i == index
-                val dotScale by animateFloatAsState(
-                    targetValue = if (active) 1f else 0.375f,
-                    animationSpec = tween(MotionDurations.ENTER_MS, easing = EaseOutStrong),
-                    label = "dotScale"
-                )
-                Box(
-                    modifier = Modifier
-                        .padding(horizontal = 3.dp)
-                        .height(6.dp)
-                        .width(16.dp)
-                        // 固定 16dp + scaleX(0.375→1)，视觉上仍是 6dp→16dp。
-                        // 用 transform 而不是动 width：动 width 走布局阶段（每帧 relayout + repaint）。
-                        .graphicsLayer { scaleX = dotScale }
-                        .clip(RoundedCornerShape(3.dp))
-                        .background(
-                            if (active) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.15f)
-                        )
-                )
+        // 页码指示器。
+        //
+        // v2.6.17：原实现固定每点宽 16dp + 左右各 3dp padding = 22dp，19 条科普
+        // 就是 418dp —— 超出任何手机屏宽（常见 360~412dp），末尾几个点被裁掉。
+        // 根因是激活态用 `graphicsLayer { scaleX = ... }` 缩放：transform 只影响
+        // 绘制，**不参与布局测量**，所以非激活点看着只有 6dp、实际仍占满 22dp。
+        //
+        // 现改为「按可用宽度自适应」：先量出容器宽度，再算每点能分到多少，
+        // 点宽/间距按比例收缩并设下限，保证整排始终完整落在卡片内。
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            val count = tips.size
+            // 每点理想占位（点宽 + 两侧间距）
+            val idealSlot = 22.dp
+            val minDot = 3.dp
+            val minGap = 1.dp
+            val available = maxWidth
+            val slot = if (count > 0) {
+                (available / count).coerceAtMost(idealSlot)
+            } else {
+                idealSlot
+            }
+            // 由可用槽位反推点宽与间距：先保间距，剩下的给点宽；点宽不低于 minDot。
+            // 槽位 = 点宽 + 两侧间距，而激活态要放大到 2.4 倍，所以点宽得留出余量：
+            // 直接按 (slot - 2*gap) / 2.4 反推，保证放大后仍不越过相邻点。
+            val gap = 2.dp.coerceAtMost((slot / 8f).coerceAtLeast(minGap))
+            val dotWidth = ((slot - gap * 2) / 2.4f).coerceAtLeast(minDot)
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                repeat(count) { i ->
+                    val active = i == index
+                    val dotScale by animateFloatAsState(
+                        targetValue = if (active) 2.4f else 1f,
+                        animationSpec = tween(MotionDurations.ENTER_MS, easing = EaseOutStrong),
+                        label = "dotScale"
+                    )
+                    Box(
+                        modifier = Modifier
+                            .padding(horizontal = gap)
+                            .height(6.dp)
+                            .width(dotWidth)
+                            // 基础宽 = dotWidth（已按可用宽度收缩），再乘 1→2.4 的
+                            // 绘制缩放表示激活。槽位留了 2.4 倍余量，放大不会越界。
+                            .graphicsLayer { scaleX = dotScale }
+                            .clip(RoundedCornerShape(3.dp))
+                            .background(
+                                if (active) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.15f)
+                            )
+                    )
+                }
             }
         }
     }
@@ -315,23 +345,29 @@ fun StatItem(value: String, label: String, modifier: Modifier = Modifier) {
 // ==================== v2.3：用眼侧小结 ====================
 
 /**
- * 今日用眼小结（实用向核心）：用眼总时长 / 最长连续用眼 / 休息次数 + 目标进度条。
+ * 今日用眼小结：屏幕亮屏时长 / 休息次数 + 目标进度条。
  *
- * @param workSeconds 今日用眼总秒数
- * @param longestStreakSeconds 今日最长连续用眼秒数
+ * v2.6.16：主指标由 App 自统计的「用眼总时长」改为**系统亮屏时长**。
+ * 自统计那套记账（累计 + 水位线 + 段序号）在「息屏广播丢失、进程被回收」时
+ * 会把整段息屏时间算成用眼（实测系统亮屏 3 分钟 / 自统计 33 分钟），
+ * 屡修不净，故整体废止。「最长连续用眼」在亮屏口径下没有对应物，一并移除。
+ *
+ * @param screenOnSeconds 今日系统亮屏秒数；null = 未授权/拿不到，展示占位
  * @param restCount 今日休息次数
  * @param goalMinutes 每日用眼目标（分钟）
+ * @param onRequestScreenTime 未授权时点「去开启」的回调
  */
 @Composable
 fun TodayWorkSummaryCard(
-    workSeconds: Int,
-    longestStreakSeconds: Int,
+    screenOnSeconds: Long?,
     restCount: Int,
-    goalMinutes: Int
+    goalMinutes: Int,
+    onRequestScreenTime: (() -> Unit)? = null
 ) {
     val goalSeconds = (goalMinutes * 60).coerceAtLeast(1)
+    val workSeconds = screenOnSeconds?.toInt() ?: 0
     val progress = (workSeconds.toFloat() / goalSeconds).coerceIn(0f, 1f)
-    val overGoal = workSeconds > goalSeconds
+    val overGoal = screenOnSeconds != null && workSeconds > goalSeconds
 
     SoftCard {
         Row(
@@ -339,31 +375,42 @@ fun TodayWorkSummaryCard(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                "📋 今日用眼小结",
+                "今日用眼小结",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.primary,
                 fontWeight = FontWeight.Medium,
                 modifier = Modifier.weight(1f)
             )
-            Text(
-                if (overGoal) "⚠️ 已超目标" else "✅ 未超标",
-                style = MaterialTheme.typography.labelSmall,
-                color = if (overGoal) MaterialTheme.colorScheme.error
+            if (screenOnSeconds != null) {
+                // v2.6.20：原为 emoji「⚠️ 已超目标 / ✅ 未超标」。emoji 走系统彩色
+                // 字体，与相邻 labelSmall 文字基线对不齐；改用自绘图标 + 同色文字，
+                // 图标只承担状态识别，语义仍由文字承载。
+                val warnColor = if (overGoal) MaterialTheme.colorScheme.error
                 else MaterialTheme.colorScheme.primary
-            )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = if (overGoal) EyeIcons.AlertCircle else EyeIcons.CheckCircle,
+                        contentDescription = null,
+                        tint = warnColor,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        if (overGoal) "已超目标" else "未超标",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = warnColor
+                    )
+                }
+            }
         }
 
         Spacer(Modifier.height(12.dp))
 
         Row(modifier = Modifier.fillMaxWidth()) {
             StatItem(
-                value = formatDurationShort(workSeconds),
-                label = "用眼总时长",
-                modifier = Modifier.weight(1f)
-            )
-            StatItem(
-                value = formatDurationShort(longestStreakSeconds),
-                label = "最长连续用眼",
+                // 未授权时主数字位留占位，不留一个可能是错的自统计值
+                value = screenOnSeconds?.let { formatDurationShort(it.toInt()) } ?: "--",
+                label = "亮屏时长",
                 modifier = Modifier.weight(1f)
             )
             StatItem(
@@ -373,27 +420,61 @@ fun TodayWorkSummaryCard(
             )
         }
 
-        Spacer(Modifier.height(14.dp))
+        if (screenOnSeconds != null) {
+            Spacer(Modifier.height(14.dp))
 
-        LinearProgressIndicator(
-            progress = { progress },
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(10.dp)
-                .clip(RoundedCornerShape(5.dp)),
-            color = if (overGoal) MaterialTheme.colorScheme.error
-            else MaterialTheme.colorScheme.primary,
-            trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f),
-            strokeCap = androidx.compose.ui.graphics.StrokeCap.Round
-        )
+            LinearProgressIndicator(
+                progress = { progress },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(10.dp)
+                    .clip(RoundedCornerShape(5.dp)),
+                color = if (overGoal) MaterialTheme.colorScheme.error
+                else MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f),
+                strokeCap = androidx.compose.ui.graphics.StrokeCap.Round
+            )
 
-        Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(6.dp))
 
-        Text(
-            "已完成目标的 ${(progress * 100).toInt()}% · 目标 $goalMinutes 分钟",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
+            Text(
+                "已完成目标的 ${(progress * 100).toInt()}% · 目标 $goalMinutes 分钟",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Spacer(Modifier.height(8.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+            Spacer(Modifier.height(8.dp))
+
+            Text(
+                "数据来自系统的屏幕亮屏记录，包含亮着屏但没在用眼的时间。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        } else if (onRequestScreenTime != null) {
+            Spacer(Modifier.height(8.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+            Spacer(Modifier.height(8.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "开启「使用情况访问」后即可显示",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f)
+                )
+                TextButton(
+                    onClick = onRequestScreenTime,
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                ) {
+                    Text("去开启", style = MaterialTheme.typography.labelMedium)
+                }
+            }
+        }
     }
 }
 

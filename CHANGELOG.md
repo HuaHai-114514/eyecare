@@ -32,6 +32,7 @@ README 只保留精简版的版本历史与更新日志简表；需要追溯细�
 | v2.4.2 | 32 | `9b70603091d9272f1e1df716a0b9ad17`（8,147,727 字节，release 已签名） |
 | v2.4.3 | 33 | `8c9b1226b32e47826e4958e96d2e5596`（8,147,731 字节，release 已签名） |
 | v2.6.11 | 34 | `1a019c962f046fc9c01ac24abb54db95`（8,164,467 字节，release 已签名） |
+| v2.7.0 | 35 | `497dc33da4b378ba7f40b2aca3853d22`（8,180,883 字节，release 已签名） |
 
 ---
 
@@ -455,3 +456,71 @@ README 只保留精简版的版本历史与更新日志简表；需要追溯细�
 
 5. `StatsStore` 增加进程内缓存：界面每秒刷新时不再反复反序列化整份统计 JSON；报告页不再把每秒变化的 `todayWorkSeconds` 当作缓存键（以前等于每秒重算 30/60 天数据）。所有写路径统一经 `saveAll` 刷新缓存。
 6. 删除无调用方的死代码、模板残留资源（`colors.xml`）与两个模板测试空壳。
+
+
+---
+
+## v2.7.0 改动摘要
+
+本版修掉三个计时问题（其中两个是同一类根因的反复发作），并新增系统亮屏时长对照、时间设置滚轮化与一批视觉修正。详细说明见 [releases/v2.7.0.md](releases/v2.7.0.md)。
+
+### 修复「用眼时长统计虚高」
+
+**现象**：息屏前 3h17m，息屏一小时后亮屏显示 4h19m（多 62 分钟）；另有「系统亮屏 3 分钟、自统计 33 分钟」。
+
+**根因**：`screenOnAt` 是**进程内事件推断值**，被无条件采信。它一旦失真（进程在息屏期间被杀、广播被系统丢弃、厂商省电策略拦截），`当前时刻 - screenOnAt` 就把**整段息屏时间当作连续用眼**结算入统计。
+
+**方案**：
+1. 所有累计入口把**真实屏幕状态**交叉传进来（`accumulatedAt(state, at, screenActuallyOn)`），屏幕实际熄灭时一律按「未在累计」处理。
+2. 累计段引入**代际序号**（`accumGeneration` / `recordedGeneration`）：开新段时序号 +1、水位线同步归零，`recordWorkSession` 只在序号一致时才认旧基准。
+
+### 修复「息屏后亮屏不重置计时」
+
+两个独立缺陷叠加，且都表现为**时好时坏**：
+
+1. **`offAt` 从未落盘**。`onScreenOff` 最常走的 `branch=NORMAL` 分支丢弃了 `recordWorkSession(...)` 的返回值，而该函数已改为纯状态推进（内部不再落盘）→ `offAt = t` 算得对却从未写盘，磁盘恒为 `-1` → `leftLong` 恒假 → 判不出「离开过」。
+   日志铁证：`10:29:38 [REC-WORK] offAt=1791944978132`，4 分 34 秒后 `10:34:12 [SCREEN-ON] offAt=-1`。
+   修法：显式落盘（`TimerStore.save(context, settled.copy(offAt = t))`），不再依赖被调用方的副作用。
+
+2. **`ACTION_SCREEN_ON` 被摘掉了**。`ACTION_USER_PRESENT` **只在「锁屏 → 解锁」时才发**；息屏前没锁屏（看视频 / 读长文时自动息屏）时亮屏只发 `SCREEN_ON`，于是归零路径一次都不执行，锁屏解锁才生效——正是间歇性失效。
+   修法：还原为两个 action 都触发 `onScreenOn`，规则抽成 `startsScreenOnSession(action)` 纯函数由单测锁住。幂等本来就由 `consumeScreenOnEdge()` 读后清零保证，不需要靠掐广播源。
+
+### 修复「次日首次亮屏误弹超时 500+ 分钟」
+
+跨天时 `screenOnAt` 被无条件改写为有效值，清晨采信了**跨夜**的陈旧时间戳 → `elapsed >= workMs` 恒真。
+
+修法：「本段累计起点」只有在**本段仍在累计中**且**屏幕此刻真的亮着**时才可延续，否则以当前时刻重新起算；`elapsed` 改为基于**刚落盘的状态**计算，不再重读盘。
+
+同源问题一并修掉：**切后台回来从零重算**（兜底判据 `workAccumMs <= 0L` 与 `newSegment` 形成自维持死循环，段序号实测疯涨 79 → 84 → 85）、**亮屏误弹超时**（两次独立广播导致 `offAt` 被抹成 -1 后 `leftLong` 恒假并重排闹钟）。
+
+### 新增：系统亮屏时长对照
+
+`data/ScreenTimeStore.kt` 用 `UsageStatsManager` 查 `SCREEN_INTERACTIVE` / `SCREEN_NON_INTERACTIVE` 逐对累加今日亮屏时长，在报告页与自统计**并排对照**，含四分支判读文案。**刻意不替换用眼时长**——亮屏 ≠ 用眼。申请 `PACKAGE_USAGE_STATS`，无权限时自动隐藏并提供跳转入口。
+
+### 新增：时间设置滚轮
+
+分钟类设置由步进器改为滚轮（`LazyColumn` + `rememberSnapFlingBehavior`）：停稳后高亮中间格，底部「取消 / 确定」，点确定才写入；每日用眼目标改**双栏**（小时 0..12 + 分钟 0..59，允许 0 小时，不联动，下限仍 clamp 到 10 分钟）；字号 18sp→20sp、行高 44dp→48dp、视口 220dp→240dp。
+
+踩坑：最初按 `firstVisibleItemIndex` 取选中项，吸附收尾会多翻一格 → 改为按「项中心距视口中心最近」取值，只在 `isScrollInProgress` 转 false 时读一次。
+
+### 视觉与交互修正
+
+- `EyeIcons` 新增 `CheckCircle` / `AlertCircle` 矢量图标，替换「提醒可靠性自检」页的 ✅ / ⚠️ emoji（原来与文字基线不齐、行高被撑开换行）；同步替换报告页两处标题 emoji。**科普提示、通知、休息页 emoji 按用户要求保留**。
+- 免打扰卡片改 Row + 左侧竖条；首次引导弹窗标题改矢量图标 + 文字。
+- 首页三页标题居左，删两处副标题；导航栏高亮改即时（`goTo` 先切 `currentTab` 再动画滚页）。
+- 休息页两按钮改绿色实心填充、各占一半宽度。
+- 统计口径修正：`addWorkSession` 增加 `streakSeconds`，原来每次增量结算都被当成独立一段「连续用眼」。
+
+### 清理
+
+删除临时诊断基建（`data/DiagLog.kt`、`EyeTimer` 内 11 处状态日志、`TimerStore.save()` 写盘追踪、设置页「计时诊断日志」区块）与仓库根 `AGENTS.md`。诊断代码排查时很有用，但每次写盘多一次 prefs 读与栈回溯，问题定位后按计划移除。
+
+### 验证
+
+单元测试 **79 / 79 通过，0 失败**。新增 `ScreenTruthTest`、`GenerationDedupTest`、`ScreenEdgeDispatchTest`；其中 `ScreenEdgeDispatchTest` 专门锁住「`SCREEN_ON` 与 `USER_PRESENT` 都必须触发亮屏会话」，防止再有人把 `SCREEN_ON` 摘掉。
+
+真机验收：用眼时长统计、息屏后亮屏重置、**跨天亮屏重置**均通过。
+
+### 教训
+
+怀疑回归时先去反编译 APK 逐字节对比 dex，解析器反复出错（`field_ids` 与 `method_ids` 偏移写重叠、字符串长度前缀当成首字符、`class_data_item` 用绝对索引而非增量编码），花了十几轮；而真凶用一条 `git show HEAD:<文件>` 对 diff 就能看出来。**怀疑回归时，第一件事应该是拿稳定版源码直接对 diff。**

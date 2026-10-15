@@ -8,15 +8,18 @@ import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
+import androidx.compose.material3.Icon
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.java.myapplication.ui.components.EyeIcons
 import com.java.myapplication.notify.RestNotifier
 import com.java.myapplication.notify.RestOverlayService
 
@@ -66,7 +69,7 @@ fun DiagnosticsPanel(onDismiss: () -> Unit) {
                     color = MaterialTheme.colorScheme.onSurface
                 )
                 Text(
-                    if (problems == 0) "全部检查通过 🌿" else "有 $problems 项需要注意",
+                    if (problems == 0) "全部检查通过" else "有 $problems 项需要注意",
                     style = MaterialTheme.typography.labelMedium,
                     color = if (problems == 0) MaterialTheme.colorScheme.primary
                     else MaterialTheme.colorScheme.error
@@ -103,9 +106,15 @@ internal fun DiagRow(item: DiagItem) {
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                if (item.ok) "✅" else "⚠️",
-                style = MaterialTheme.typography.titleMedium
+            // v2.6.20：原用 emoji「✅ / ⚠️」。emoji 走系统彩色字体，字形与基线
+            // 随 ROM 变化，与相邻文字对不齐；这里改用自绘矢量图标（与底部导航同一
+            // 套 EyeIcons），尺寸与垂直居中可控，颜色交给主题。
+            Icon(
+                imageVector = if (item.ok) EyeIcons.CheckCircle else EyeIcons.AlertCircle,
+                contentDescription = if (item.ok) "已就绪" else "需要处理",
+                tint = if (item.ok) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.tertiary,
+                modifier = Modifier.size(22.dp)
             )
             Spacer(Modifier.width(8.dp))
             Column(modifier = Modifier.weight(1f)) {
